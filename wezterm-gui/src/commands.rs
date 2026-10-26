@@ -596,7 +596,8 @@ fn spawn_command_from_action(action: &KeyAssignment) -> Option<&SpawnCommand> {
         SplitHorizontal(command)
         | SplitVertical(command)
         | SpawnCommandInNewWindow(command)
-        | SpawnCommandInNewTab(command) => Some(command),
+        | SpawnCommandInNewTab(command)
+        | ShowOverlayCommand(command) => Some(command),
         _ => None,
     }
 }
@@ -1629,6 +1630,17 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
             args: &[ArgType::ActiveWindow],
             menubar: &["Shell"],
             icon: None,
+        },
+        ShowOverlayCommand(cmd) => CommandDef {
+            brief: label_string(action, format!("Run {cmd:?} in an overlay").to_string()).into(),
+            doc: format!(
+                "Runs {cmd:?} in an overlay that covers the tab until the program exits"
+            )
+            .into(),
+            keys: vec![],
+            args: &[ArgType::ActiveWindow],
+            menubar: &[],
+            icon: Some("md_application"),
         },
         ShowTabNavigator => CommandDef {
             brief: "Navigate tabs".into(),

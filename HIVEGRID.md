@@ -11,6 +11,12 @@ on top of upstream; `origin` is the private fork, `upstream` is wezterm/wezterm.
   `docs/config/lua/window-events/status-click.md`. Implemented through an OSC 8
   hyperlink with the `wezterm-status-click:` scheme, so the id travels through
   the unchanged `set_right_status` string path; stock WezTerm ignores it.
+- `ShowOverlayCommand` key assignment (argument: a `SpawnCommand`): runs a program in a
+  pty-backed overlay that covers the active tab until the program exits, then restores the
+  tab; its panes keep running underneath. Only the full-tab overlay exists, there is no
+  centred modal mode. Programs in the overlay can set user vars (`user-var-changed` fires).
+  See `docs/config/lua/keyassignment/ShowOverlayCommand.md`. Stock WezTerm rejects the
+  action; guard it with `pcall`.
 - Fancy tab bar proportions: `tab_bar_height_scale`, `tab_bar_status_scale`,
   `tab_bar_separator_height` and `tab_bar_separator_color` (see
   `docs/config/lua/config/`). Stock WezTerm rejects them, so set them with `pcall`.

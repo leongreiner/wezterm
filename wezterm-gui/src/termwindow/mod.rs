@@ -1910,7 +1910,17 @@ impl TermWindow {
 
         let (_domain, window_id, _tab_id) = match mux.resolve_pane_id(pane_id) {
             Some(tuple) => tuple,
-            None => return false,
+            // Not in any tab: it may still be the overlay of one of this window's
+            // tabs (ShowOverlayCommand), which belongs to this window.
+            None => {
+                return self.tab_state.borrow().values().any(|state| {
+                    state
+                        .overlay
+                        .as_ref()
+                        .map(|overlay| overlay.pane.pane_id() == pane_id)
+                        .unwrap_or(false)
+                })
+            }
         };
 
         return window_id == self.mux_window_id;
@@ -2391,6 +2401,60 @@ impl TermWindow {
         self.show_launcher_impl(args, active_tab_idx);
     }
 
+    /// Runs `spawn` in a pty-backed pane that covers the active tab until its
+    /// process exits; the tab's own panes keep running underneath.
+    fn show_overlay_command(&mut self, spawn: &SpawnCommand) {
+        let mux = Mux::get();
+        let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+            Some(tab) => tab,
+            None => return,
+        };
+        let current_pane = match self.get_active_pane_no_overlay() {
+            Some(pane) => pane,
+            None => return,
+        };
+        let window = self.window.clone().unwrap();
+        let spawn = spawn.clone();
+        let tab_id = tab.tab_id();
+        let size = self.terminal_size;
+        let term_config = Arc::new(TermConfig::with_config(self.config.clone()));
+
+        promise::spawn::spawn(async move {
+            let result = crate::overlay::spawn_command_overlay_pane(
+                &spawn,
+                size,
+                current_pane.pane_id(),
+                term_config,
+            )
+            .await;
+            let overlay = match result {
+                Ok(overlay) => overlay,
+                Err(err) => {
+                    log::error!("ShowOverlayCommand: {:#}", err);
+                    return;
+                }
+            };
+            let overlay_id = overlay.pane_id();
+
+            let win = window.clone();
+            win.notify(TermWindowNotif::Apply(Box::new(move |term_window| {
+                term_window.assign_overlay(tab_id, overlay);
+            })));
+
+            // The overlay is not part of the tab, so the mux will not reap it:
+            // watch for the program's exit and restore the tab.
+            while !Mux::get()
+                .get_pane(overlay_id)
+                .map(|pane| pane.is_dead())
+                .unwrap_or(true)
+            {
+                Timer::after(Duration::from_millis(100)).await;
+            }
+            TermWindow::schedule_cancel_overlay(window, tab_id, Some(overlay_id));
+        })
+        .detach();
+    }
+
     fn show_launcher(&mut self) {
         let title = "Launcher".to_string();
         let args = LauncherActionArgs {
@@ -2784,6 +2848,7 @@ impl TermWindow {
             ScrollToBottom => self.scroll_to_bottom(pane),
             ShowTabNavigator => self.show_tab_navigator(),
             ShowDebugOverlay => self.show_debug_overlay(),
+            ShowOverlayCommand(spawn) => self.show_overlay_command(spawn),
             ShowLauncher => self.show_launcher(),
             ShowLauncherArgs(args) => {
                 let title = args.title.clone().unwrap_or("Launcher".to_string());

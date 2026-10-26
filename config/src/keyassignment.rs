@@ -583,6 +583,7 @@ pub enum KeyAssignment {
     SplitVertical(SpawnCommand),
     ShowLauncher,
     ShowLauncherArgs(LauncherActionArgs),
+    ShowOverlayCommand(SpawnCommand),
     ClearScrollback(ScrollbackEraseMode),
     Search(Pattern),
     ActivateCopyMode,

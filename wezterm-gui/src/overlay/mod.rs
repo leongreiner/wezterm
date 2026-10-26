@@ -1,4 +1,7 @@
 use crate::termwindow::TermWindow;
+use anyhow::Context;
+use config::keyassignment::SpawnCommand;
+use config::TermConfig;
 use mux::pane::{Pane, PaneId};
 use mux::tab::{Tab, TabId};
 use mux::termwiztermtab::{allocate, TermWizTerminal};
@@ -88,4 +91,45 @@ where
     });
 
     (tw_tab, Box::pin(future))
+}
+
+/// Spawns `spawn` as a pane that belongs to no tab, for use as a tab overlay.
+/// The domain is resolved against `current_pane_id` like a new tab's would be.
+pub async fn spawn_command_overlay_pane(
+    spawn: &SpawnCommand,
+    size: TerminalSize,
+    current_pane_id: PaneId,
+    term_config: Arc<TermConfig>,
+) -> anyhow::Result<Arc<dyn Pane>> {
+    let mux = mux::Mux::get();
+    let domain = mux
+        .resolve_spawn_tab_domain(Some(current_pane_id), &spawn.domain)
+        .context("resolve_spawn_tab_domain")?;
+
+    let mut builder = spawn
+        .args
+        .as_ref()
+        .map(|args| portable_pty::CommandBuilder::from_argv(args.iter().map(Into::into).collect()))
+        .unwrap_or_else(portable_pty::CommandBuilder::new_default_prog);
+    for (k, v) in spawn.set_environment_variables.iter() {
+        builder.env(k, v);
+    }
+    let cwd = match spawn.cwd.as_ref() {
+        Some(cwd) => {
+            builder.cwd(cwd);
+            Some(
+                cwd.to_str()
+                    .map(|s| s.to_owned())
+                    .ok_or_else(|| anyhow::anyhow!("cwd must be unicode: {:?}", cwd))?,
+            )
+        }
+        None => None,
+    };
+
+    let pane = domain
+        .spawn_pane(size, Some(builder), cwd)
+        .await
+        .context("spawn_pane")?;
+    pane.set_config(term_config);
+    Ok(pane)
 }
