@@ -1,7 +1,8 @@
 # Hivegrid fork of WezTerm
 
-Private fork of `wezterm/wezterm` main. Branch `hivegrid` carries a few commits
-on top of upstream; `origin` is the private fork, `upstream` is wezterm/wezterm.
+Fork of `wezterm/wezterm` main for [Hivegrid](https://github.com/leongreiner/hivegrid). Branch
+`hivegrid` carries a few commits on top of upstream; `origin` is this fork, `upstream` is
+wezterm/wezterm.
 
 ## What it changes
 
