@@ -129,6 +129,7 @@ impl crate::TermWindow {
 
             match item.item {
                 TabBarItem::RightStatus | TabBarItem::LeftStatus | TabBarItem::None => element
+                    .vertical_align(VerticalAlign::Middle)
                     .item_type(UIItemType::TabBar(TabBarItem::None))
                     .line_height(Some(self.config.tab_bar_status_scale))
                     .margin(BoxDimension {
