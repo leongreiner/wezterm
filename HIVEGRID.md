@@ -33,6 +33,10 @@ on top of upstream; `origin` is the private fork, `upstream` is wezterm/wezterm.
   `tab_bar_floating_tabs` draws tabs and "+" as rounded chips centred in the bar, level
   with the status boxes. Both are rejected by stock WezTerm: set them with `pcall`.
 
+- Wayland window drag: the Wayland backend implements `request_drag_move`
+  (`xdg_toplevel.move`), which it lacked, so the integrated tab bar can move the window on
+  Wayland (it already could on X11).
+
 ## Build without sudo
 
 The extra development libraries live in `~/.local/sysroot` (unpacked .debs).

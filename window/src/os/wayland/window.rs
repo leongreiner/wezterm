@@ -366,6 +366,13 @@ impl WindowOps for WaylandWindow {
         });
     }
 
+    fn request_drag_move(&self) {
+        WaylandConnection::with_window_inner(self.0, |inner| {
+            inner.request_drag_move();
+            Ok(())
+        });
+    }
+
     fn notify<T: Any + Send + Sync>(&self, t: T)
     where
         Self: Sized,
@@ -989,6 +996,25 @@ impl WaylandWindowInner {
                 notify.try_send(()).ok();
             }
         }
+    }
+
+    /// Asks the compositor to move the window with the pointer (xdg_toplevel.move), the
+    /// request the client-side frame makes for its title bar. Without it the integrated
+    /// tab bar cannot drag the window on Wayland. The serial is that of the latest pointer
+    /// event, i.e. of the press that started the drag.
+    fn request_drag_move(&mut self) {
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
+        let conn = Connection::get().unwrap().wayland();
+        let state = conn.wayland_state.borrow();
+        let Some(pointer) = state.pointer.as_ref() else {
+            return;
+        };
+        let Some(data) = pointer.pointer().data::<PointerUserData>() else {
+            return;
+        };
+        window.move_(data.pdata.seat(), *state.last_serial.borrow());
     }
 
     fn set_cursor(&mut self, cursor: Option<CursorIcon>) {
