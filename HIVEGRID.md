@@ -13,6 +13,11 @@ on top of upstream; `origin` is the private fork, `upstream` is wezterm/wezterm.
   the unchanged `set_right_status` string path; stock WezTerm ignores it. Holding the
   left button on such a region (brand mark included) and moving more than 4 px drags the
   window instead of clicking, so the header can be grabbed anywhere.
+- Mouse pointer shape (OSC 22): a program that grabs the mouse can request a pointer
+  shape (`ESC ] 22 ; ew-resize ST`; `=name` sets, `>name` pushes, `<` pops, an empty name
+  restores the default; a comma separated list is a fallback list of CSS cursor names). The
+  shape applies while the pointer is over that pane and the pane has mouse reporting on.
+  Stock WezTerm ignores the sequence. The explorer uses it for the column borders.
 - `ShowOverlayCommand` key assignment (argument: a `SpawnCommand`): runs a program in a
   pty-backed overlay that covers the active tab until the program exits, then restores the
   tab; its panes keep running underneath. Only the full-tab overlay exists, there is no

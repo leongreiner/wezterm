@@ -52,6 +52,9 @@ pub enum OperatingSystemCommand {
     ResetColors(Vec<u8>),
     RxvtExtension(Vec<String>),
     ConEmuProgress(Progress),
+    /// OSC 22: the application's requested mouse pointer shape (xterm/kitty pointer
+    /// shapes). Carries the raw parameter, e.g. `ew-resize`, `=ew-resize`, `>text`, `<`.
+    SetMousePointerShape(String),
 
     Unspecified(Vec<Vec<u8>>),
 }
@@ -364,6 +367,16 @@ impl OperatingSystemCommand {
             FinalTermSemanticPrompt => self::FinalTermSemanticPrompt::parse(osc)
                 .map(OperatingSystemCommand::FinalTermSemanticPrompt),
             ChangeColorNumber => Self::parse_change_color_number(osc),
+            SetMousePointerShape => {
+                let mut s = String::new();
+                for (idx, part) in osc.iter().skip(1).enumerate() {
+                    if idx > 0 {
+                        s.push(';');
+                    }
+                    s.push_str(&String::from_utf8(part.to_vec())?);
+                }
+                Ok(OperatingSystemCommand::SetMousePointerShape(s))
+            }
             ResetColors => Self::parse_reset_colors(osc),
 
             ResetSpecialColor
@@ -480,6 +493,7 @@ osc_entries!(
     SetHighlightBackgroundColor = "17",
     SetTektronixCursorColor = "18",
     SetHighlightForegroundColor = "19",
+    SetMousePointerShape = "22",
     SetLogFileName = "46",
     SetFont = "50",
     EmacsShell = "51",
@@ -612,6 +626,7 @@ impl Display for OperatingSystemCommand {
             ConEmuProgress(Progress::SetError(pct)) => write!(f, "9;4;2;{pct}")?,
             ConEmuProgress(Progress::SetIndeterminate) => write!(f, "9;4;3")?,
             ConEmuProgress(Progress::Paused) => write!(f, "9;4;4")?,
+            SetMousePointerShape(s) => write!(f, "22;{}", s)?,
         };
         // Use the longer form ST as neovim doesn't like the BEL version
         write!(f, "\x1b\\")?;

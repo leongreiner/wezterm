@@ -333,6 +333,8 @@ pub struct TerminalState {
     button_event_mouse: bool,
     current_mouse_buttons: Vec<MouseButton>,
     last_mouse_move: Option<MouseEvent>,
+    /// OSC 22 pointer shape stack; the last entry is in effect
+    mouse_pointer_shapes: Vec<String>,
     cursor_visible: bool,
 
     keyboard_encoding: KeyboardEncoding,
@@ -559,6 +561,7 @@ impl TerminalState {
             button_event_mouse: false,
             mouse_tracking: false,
             last_mouse_move: None,
+            mouse_pointer_shapes: Vec::new(),
             cursor_visible: true,
             g0_charset: CharSet::Ascii,
             g1_charset: CharSet::Ascii,
@@ -764,6 +767,33 @@ impl TerminalState {
     /// to dispatch mouse events to the terminal.
     pub fn is_mouse_grabbed(&self) -> bool {
         self.mouse_tracking || self.button_event_mouse || self.any_event_mouse
+    }
+
+    /// The mouse pointer shape the application requested with OSC 22 (a CSS cursor
+    /// name, or a comma separated list of fallbacks), if any.
+    pub fn mouse_pointer_shape(&self) -> Option<&str> {
+        self.mouse_pointer_shapes.last().map(String::as_str)
+    }
+
+    /// Applies the parameter of an OSC 22 sequence to the pointer shape stack:
+    /// `name` or `=name` replaces the top entry, an empty name restores the default,
+    /// `>name` pushes, `<` pops, `?` (a query) is ignored.
+    pub(crate) fn apply_mouse_pointer_shape(&mut self, param: &str) {
+        if let Some(name) = param.strip_prefix('>') {
+            self.mouse_pointer_shapes.push(name.to_string());
+        } else if param.starts_with('<') {
+            self.mouse_pointer_shapes.pop();
+        } else if param.starts_with('?') {
+        } else {
+            let name = param.strip_prefix('=').unwrap_or(param);
+            if name.is_empty() {
+                self.mouse_pointer_shapes.pop();
+            } else if let Some(top) = self.mouse_pointer_shapes.last_mut() {
+                *top = name.to_string();
+            } else {
+                self.mouse_pointer_shapes.push(name.to_string());
+            }
+        }
     }
 
     /// Returns true if the alternate screen (secondary screen buffer) is currently active.

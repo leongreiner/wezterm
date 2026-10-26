@@ -1378,3 +1378,28 @@ fn test_hyperlinks() {
         Compare::TEXT | Compare::ATTRS,
     );
 }
+
+#[test]
+fn test_osc22_mouse_pointer_shape() {
+    let mut term = TestTerm::new(3, 5, 0);
+    assert_eq!(term.mouse_pointer_shape(), None);
+
+    term.print("\x1b]22;ew-resize\x1b\\");
+    assert_eq!(term.mouse_pointer_shape(), Some("ew-resize"));
+
+    // `=` replaces the top entry, an empty name restores the default.
+    term.print("\x1b]22;=text\x1b\\");
+    assert_eq!(term.mouse_pointer_shape(), Some("text"));
+    term.print("\x1b]22;\x1b\\");
+    assert_eq!(term.mouse_pointer_shape(), None);
+
+    // Push and pop nest; a query changes nothing.
+    term.print("\x1b]22;>pointer\x1b\\\x1b]22;>wait\x1b\\");
+    assert_eq!(term.mouse_pointer_shape(), Some("wait"));
+    term.print("\x1b]22;?__current__\x1b\\");
+    assert_eq!(term.mouse_pointer_shape(), Some("wait"));
+    term.print("\x1b]22;<\x1b\\");
+    assert_eq!(term.mouse_pointer_shape(), Some("pointer"));
+    term.print("\x1b]22;<\x1b\\");
+    assert_eq!(term.mouse_pointer_shape(), None);
+}

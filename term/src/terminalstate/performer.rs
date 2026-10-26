@@ -1079,6 +1079,9 @@ impl<'a> Performer<'a> {
                 self.implicit_palette_reset_if_same_as_configured();
                 self.palette_did_change();
             }
+            OperatingSystemCommand::SetMousePointerShape(param) => {
+                self.apply_mouse_pointer_shape(&param);
+            }
             OperatingSystemCommand::ConEmuProgress(prog) => {
                 use wezterm_escape_parser::osc::Progress as TProg;
                 let prog = match prog {

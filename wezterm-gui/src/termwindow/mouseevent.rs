@@ -725,6 +725,16 @@ impl super::TermWindow {
         }
     }
 
+    /// The pointer shape a mouse-grabbing application requested with OSC 22. A
+    /// comma separated list is a fallback list: the first name we know wins.
+    pub(super) fn pane_pointer_icon(pane: &Arc<dyn Pane>) -> Option<CursorIcon> {
+        use std::str::FromStr;
+        let shape = pane.mouse_pointer_shape()?;
+        shape
+            .split(',')
+            .find_map(|name| CursorIcon::from_str(name.trim()).ok())
+    }
+
     fn mouse_event_terminal(
         &mut self,
         mut pane: Arc<dyn Pane>,
@@ -917,8 +927,10 @@ impl super::TermWindow {
             // When hovering over a hyperlink, show an appropriate
             // mouse cursor to give the cue that it is clickable
             CursorIcon::Pointer
-        } else if pane.is_mouse_grabbed() || outside_window {
+        } else if outside_window {
             CursorIcon::Default
+        } else if pane.is_mouse_grabbed() {
+            Self::pane_pointer_icon(&pane).unwrap_or(CursorIcon::Default)
         } else {
             CursorIcon::Text
         }));

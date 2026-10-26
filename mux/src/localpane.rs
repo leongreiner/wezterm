@@ -501,6 +501,14 @@ impl Pane for LocalPane {
         }
     }
 
+    fn mouse_pointer_shape(&self) -> Option<String> {
+        if self.tmux_domain.lock().is_some() {
+            None
+        } else {
+            self.terminal.lock().mouse_pointer_shape().map(str::to_string)
+        }
+    }
+
     fn is_alt_screen_active(&self) -> bool {
         if self.tmux_domain.lock().is_some() {
             false

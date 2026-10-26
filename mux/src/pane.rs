@@ -318,6 +318,12 @@ pub trait Pane: Downcast + Send + Sync {
     /// In practice this controls whether the gui will perform local
     /// handling of clicks.
     fn is_mouse_grabbed(&self) -> bool;
+
+    /// The mouse pointer shape the application asked for with OSC 22 (a CSS cursor
+    /// name, or a comma separated list of fallbacks), if any.
+    fn mouse_pointer_shape(&self) -> Option<String> {
+        None
+    }
     fn is_alt_screen_active(&self) -> bool;
 
     fn set_clipboard(&self, _clipboard: &Arc<dyn Clipboard>) {}

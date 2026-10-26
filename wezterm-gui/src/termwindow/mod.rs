@@ -1449,6 +1449,32 @@ impl TermWindow {
             if let Some(ref win) = self.window {
                 win.invalidate();
             }
+            self.refresh_pane_pointer(pane_id);
+        }
+    }
+
+    /// An application that grabs the mouse answers pointer motion with OSC 22 only after
+    /// the motion was handled, so apply a changed shape right away rather than at the next
+    /// mouse event, when the pointer has usually moved on.
+    fn refresh_pane_pointer(&self, pane_id: PaneId) {
+        let Some(win) = &self.window else { return };
+        if self.current_highlight.is_some() {
+            return;
+        }
+        let (column, row) = (self.last_mouse_coords.0, self.last_mouse_coords.1);
+        let Some(pos) = self.get_panes_to_render().into_iter().find(|pos| {
+            pos.pane.pane_id() == pane_id
+                && row >= pos.top as i64
+                && row <= (pos.top + pos.height) as i64
+                && column >= pos.left
+                && column <= pos.left + pos.width
+        }) else {
+            return;
+        };
+        if pos.pane.is_mouse_grabbed() {
+            win.set_cursor(Some(
+                Self::pane_pointer_icon(&pos.pane).unwrap_or(::window::CursorIcon::Default),
+            ));
         }
     }
 
