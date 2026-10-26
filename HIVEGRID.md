@@ -18,6 +18,22 @@ on top of upstream; `origin` is the private fork, `upstream` is wezterm/wezterm.
   restores the default; a comma separated list is a fallback list of CSS cursor names). The
   shape applies while the pointer is over that pane and the pane has mouse reporting on.
   Stock WezTerm ignores the sequence. The explorer uses it for the column borders.
+- Hover for panes without focus: mouse motion over a pane that reports the mouse goes to
+  that pane even when another pane has the focus, so the sidebar bar and the
+  overview dock can highlight what is under the pointer.
+- Pointer leave report (private mode 8800): a pane learns of the pointer only while it is
+  inside it, so a program cannot tell when the pointer moves on. A program that sets
+  `CSI ? 8800 h` (reset with `CSI ? 8800 l`, query with DECRQM `CSI ? 8800 $ p`, reset by RIS)
+  is told: when the pointer moves to another pane, to a divider, the tab bar or any other
+  non-pane item, or out of the window, the GUI writes one SGR motion report without button at
+  column 0, row 0 (`ESC [ < 35 ; 0 ; 0 M`; valid positions start at 1, so it is no position)
+  and drops the OSC 22 pointer shapes the program had set, so a hand cannot outlive the
+  hover; the program sets its shape again with the motion that enters it. The report needs
+  mouse reporting on with the SGR (1006) or SGR-pixels (1016) encoding. The pane told is the
+  one the last mouse event went to (`TermWindow::hover_pane`, `Pane::mouse_leave`,
+  `TerminalState::mouse_leave`); it works for local panes only, not for panes of a mux client
+  domain. Stock WezTerm ignores the mode (unknown private modes are only logged). The bar and
+  the overview dock use it to end their hover fade.
 - `ShowOverlayCommand` key assignment (argument: a `SpawnCommand`): runs a program in a
   pty-backed overlay that covers the active tab until the program exits, then restores the
   tab; its panes keep running underneath. Only the full-tab overlay exists, there is no

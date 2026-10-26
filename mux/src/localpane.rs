@@ -396,6 +396,12 @@ impl Pane for LocalPane {
         self.terminal.lock().mouse_event(event)
     }
 
+    fn mouse_leave(&self) {
+        if let Err(err) = self.terminal.lock().mouse_leave() {
+            log::debug!("mouse_leave: {err:#}");
+        }
+    }
+
     fn key_down(&self, key: KeyCode, mods: KeyModifiers) -> Result<(), Error> {
         Mux::get().record_input_for_current_identity();
         if self.tmux_domain.lock().is_some() {

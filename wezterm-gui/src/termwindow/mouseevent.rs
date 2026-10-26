@@ -8,7 +8,7 @@ use ::window::{
 };
 use config::keyassignment::{KeyAssignment, MouseEventTrigger, SpawnTabDomain};
 use config::MouseEventAltScreen;
-use mux::pane::{Pane, WithPaneLines};
+use mux::pane::{Pane, PaneId, WithPaneLines};
 use mux::tab::SplitDirection;
 use mux::Mux;
 use mux_lua::MuxPane;
@@ -61,6 +61,19 @@ impl super::TermWindow {
             | UIItemType::BelowScrollThumb
             | UIItemType::ScrollThumb
             | UIItemType::Split(_) => {}
+        }
+    }
+
+    /// Records the pane the pointer is over (None: over a UI item or outside the window) and
+    /// tells the pane it was over before that the pointer left it, so that a program that
+    /// reports the mouse (DEC private mode 8800) can drop its hover state.
+    fn set_hover_pane(&mut self, pane_id: Option<PaneId>) {
+        if self.hover_pane == pane_id {
+            return;
+        }
+        let prior = std::mem::replace(&mut self.hover_pane, pane_id);
+        if let Some(pane) = prior.and_then(|id| Mux::get().get_pane(id)) {
+            pane.mouse_leave();
         }
     }
 
@@ -244,6 +257,9 @@ impl super::TermWindow {
             None
         };
 
+        if ui_item.is_some() {
+            self.set_hover_pane(None);
+        }
         if let Some(item) = ui_item.clone() {
             if capture_mouse {
                 self.current_mouse_capture = Some(MouseCapture::UI);
@@ -274,6 +290,7 @@ impl super::TermWindow {
 
     pub fn mouse_leave_impl(&mut self, context: &dyn WindowOps) {
         self.current_mouse_event = None;
+        self.set_hover_pane(None);
         self.update_title();
         context.set_cursor(Some(CursorIcon::Default));
         context.invalidate();
@@ -817,6 +834,10 @@ impl super::TermWindow {
 
                 break;
             }
+        }
+
+        if !is_already_captured {
+            self.set_hover_pane(Some(pane.pane_id()));
         }
 
         if capture_mouse {

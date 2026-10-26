@@ -408,6 +408,9 @@ pub struct TermWindow {
     /// If so, we ignore mouse events until released
     is_click_to_focus_window: bool,
     last_mouse_coords: (usize, i64),
+    /// The pane the pointer is over (the one that got the last mouse event); it is
+    /// told when the pointer moves on, see `Pane::mouse_leave`
+    hover_pane: Option<PaneId>,
     window_drag_position: Option<MouseEvent>,
     current_mouse_event: Option<MouseEvent>,
     prev_cursor: PrevCursorPos,
@@ -726,6 +729,7 @@ impl TermWindow {
             right_status: String::new(),
             left_status: String::new(),
             last_mouse_coords: (0, -1),
+            hover_pane: None,
             window_drag_position: None,
             current_mouse_event: None,
             current_modifier_and_leds: Default::default(),

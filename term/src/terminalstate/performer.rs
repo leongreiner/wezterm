@@ -702,6 +702,7 @@ impl<'a> Performer<'a> {
                 self.sixel_scrolls_right = false;
                 self.any_event_mouse = false;
                 self.button_event_mouse = false;
+                self.mouse_leave_report = false;
                 self.current_mouse_buttons.clear();
                 self.cursor_visible = true;
                 self.g0_charset = CharSet::Ascii;

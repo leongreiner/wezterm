@@ -316,6 +316,32 @@ impl TerminalState {
         Ok(())
     }
 
+    /// The pointer left the pane: it moved to another pane or a non-pane part of the window,
+    /// or left the window. An application that set DEC private mode 8800 gets one SGR motion
+    /// report without button at column 0, row 0 (`CSI < 35 ; 0 ; 0 M`; valid positions start
+    /// at 1, so it cannot be mistaken for a position) and loses the pointer shape it
+    /// requested with OSC 22, so that a shape cannot outlive the hover. Applications that did
+    /// not set the mode are not told, and the report needs the SGR or SGR-pixels encoding.
+    pub fn mouse_leave(&mut self) -> anyhow::Result<()> {
+        if !self.mouse_leave_report {
+            return Ok(());
+        }
+        // A motion report to the cell the pointer left from must not be swallowed as a repeat.
+        self.last_mouse_move.take();
+        self.mouse_pointer_shapes.clear();
+        if self.is_mouse_grabbed()
+            && matches!(
+                self.mouse_encoding,
+                MouseEncoding::SGR | MouseEncoding::SgrPixels
+            )
+        {
+            log::trace!("leave ESC [<35;0;0M");
+            write!(self.writer, "\x1b[<35;0;0M")?;
+            self.writer.flush()?;
+        }
+        Ok(())
+    }
+
     /// Informs the terminal of a mouse event.
     /// If mouse reporting has been activated, the mouse event will be encoded
     /// appropriately and written to the associated writer.

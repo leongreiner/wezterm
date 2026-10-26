@@ -335,6 +335,8 @@ pub struct TerminalState {
     last_mouse_move: Option<MouseEvent>,
     /// OSC 22 pointer shape stack; the last entry is in effect
     mouse_pointer_shapes: Vec<String>,
+    /// Mode 8800 (Hivegrid): report the pointer leaving the pane, see `mouse_leave`
+    mouse_leave_report: bool,
     cursor_visible: bool,
 
     keyboard_encoding: KeyboardEncoding,
@@ -562,6 +564,7 @@ impl TerminalState {
             mouse_tracking: false,
             last_mouse_move: None,
             mouse_pointer_shapes: Vec::new(),
+            mouse_leave_report: false,
             cursor_visible: true,
             g0_charset: CharSet::Ascii,
             g1_charset: CharSet::Ascii,
@@ -773,6 +776,12 @@ impl TerminalState {
     /// name, or a comma separated list of fallbacks), if any.
     pub fn mouse_pointer_shape(&self) -> Option<&str> {
         self.mouse_pointer_shapes.last().map(String::as_str)
+    }
+
+    /// Returns true if the application asked to be told when the pointer leaves the
+    /// pane (DEC private mode 8800, Hivegrid build).
+    pub fn mouse_leave_report_enabled(&self) -> bool {
+        self.mouse_leave_report
     }
 
     /// Applies the parameter of an OSC 22 sequence to the pointer shape stack:
@@ -1963,6 +1972,20 @@ impl TerminalState {
             }
             Mode::QueryDecPrivateMode(DecPrivateMode::Code(DecPrivateModeCode::FocusTracking)) => {
                 self.decqrm_response(mode, true, self.focus_tracking);
+            }
+
+            Mode::SetDecPrivateMode(DecPrivateMode::Code(DecPrivateModeCode::MouseLeaveReport)) => {
+                self.mouse_leave_report = true;
+            }
+            Mode::ResetDecPrivateMode(DecPrivateMode::Code(
+                DecPrivateModeCode::MouseLeaveReport,
+            )) => {
+                self.mouse_leave_report = false;
+            }
+            Mode::QueryDecPrivateMode(DecPrivateMode::Code(
+                DecPrivateModeCode::MouseLeaveReport,
+            )) => {
+                self.decqrm_response(mode, true, self.mouse_leave_report);
             }
 
             Mode::SetDecPrivateMode(DecPrivateMode::Code(DecPrivateModeCode::SGRMouse)) => {

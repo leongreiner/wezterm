@@ -257,6 +257,8 @@ pub trait Pane: Downcast + Send + Sync {
         PerformAssignmentResult::Unhandled
     }
     fn mouse_event(&self, event: MouseEvent) -> anyhow::Result<()>;
+    /// The pointer left the pane (Hivegrid build): see `TerminalState::mouse_leave`.
+    fn mouse_leave(&self) {}
     fn perform_actions(&self, _actions: Vec<termwiz::escape::Action>) {}
     fn is_dead(&self) -> bool;
     fn kill(&self) {}

@@ -63,6 +63,17 @@ impl TerminalConfiguration for TestTermConfig {
 
 impl TestTerm {
     fn new(height: usize, width: usize, scrollback: usize) -> Self {
+        Self::with_writer(height, width, scrollback, Box::new(Vec::new()))
+    }
+
+    /// A terminal that sends what it writes to the application (mouse reports,
+    /// answers to queries) to `writer`.
+    fn with_writer(
+        height: usize,
+        width: usize,
+        scrollback: usize,
+        writer: Box<dyn std::io::Write + Send>,
+    ) -> Self {
         let _ = env_logger::Builder::new()
             .is_test(true)
             .filter_level(log::LevelFilter::Trace)
@@ -79,7 +90,7 @@ impl TestTerm {
             Arc::new(TestTermConfig { scrollback }),
             "WezTerm",
             "O_o",
-            Box::new(Vec::new()),
+            writer,
         );
         let clip: Arc<dyn Clipboard> = Arc::new(LocalClip::new());
         term.set_clipboard(&clip);
@@ -1402,4 +1413,107 @@ fn test_osc22_mouse_pointer_shape() {
     assert_eq!(term.mouse_pointer_shape(), Some("pointer"));
     term.print("\x1b]22;<\x1b\\");
     assert_eq!(term.mouse_pointer_shape(), None);
+}
+
+/// Collects what the terminal writes to the application.
+#[derive(Clone, Default)]
+struct Sent(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Sent {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Sent {
+    /// Takes and clears what was written so far. The terminal writes from its own thread,
+    /// so a query with a known answer is sent last and waited for.
+    fn take(&self, term: &mut TestTerm) -> String {
+        const END: &str = "\x1b[?7;1$y";
+        term.print("\x1b[?7$p");
+        for _ in 0..500 {
+            let mut buf = self.0.lock().unwrap();
+            if buf.ends_with(END.as_bytes()) {
+                let all = String::from_utf8(std::mem::take(&mut *buf)).unwrap();
+                return all[..all.len() - END.len()].to_string();
+            }
+            drop(buf);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        panic!("terminal did not answer: {:?}", self.0.lock().unwrap());
+    }
+}
+
+fn mouse_move(term: &mut TestTerm, x: usize, y: i64) {
+    term.mouse_event(crate::input::MouseEvent {
+        kind: crate::input::MouseEventKind::Move,
+        button: crate::input::MouseButton::None,
+        modifiers: crate::input::KeyModifiers::NONE,
+        x,
+        y,
+        x_pixel_offset: 0,
+        y_pixel_offset: 0,
+    })
+    .unwrap();
+}
+
+#[test]
+fn test_mouse_leave_report() {
+    let sent = Sent::default();
+    let mut term = TestTerm::with_writer(5, 10, 0, Box::new(sent.clone()));
+
+    // Without the mode nothing is reported and the pointer shape stays.
+    term.print("\x1b[?1003h\x1b[?1006h\x1b]22;pointer\x1b\\");
+    term.mouse_leave().unwrap();
+    assert_eq!(sent.take(&mut term), "");
+    assert_eq!(term.mouse_pointer_shape(), Some("pointer"));
+
+    // The mode can be queried (DECRQM): reset, then set.
+    term.print("\x1b[?8800$p");
+    assert_eq!(sent.take(&mut term), "\x1b[?8800;2$y");
+    term.print("\x1b[?8800h\x1b[?8800$p");
+    assert!(term.mouse_leave_report_enabled());
+    assert_eq!(sent.take(&mut term), "\x1b[?8800;1$y");
+
+    // Motion is reported with 1-based cells; the leave is a motion report without button at
+    // the impossible position 0;0 and it clears the pointer shape.
+    mouse_move(&mut term, 3, 2);
+    assert_eq!(sent.take(&mut term), "\x1b[<35;4;3M");
+    mouse_move(&mut term, 3, 2);
+    assert_eq!(sent.take(&mut term), "");
+    term.mouse_leave().unwrap();
+    assert_eq!(sent.take(&mut term), "\x1b[<35;0;0M");
+    assert_eq!(term.mouse_pointer_shape(), None);
+
+    // Coming back to the cell the pointer left from is reported again.
+    mouse_move(&mut term, 3, 2);
+    assert_eq!(sent.take(&mut term), "\x1b[<35;4;3M");
+
+    // SGR-pixels reports the leave the same way.
+    term.print("\x1b[?1016h");
+    term.mouse_leave().unwrap();
+    assert_eq!(sent.take(&mut term), "\x1b[<35;0;0M");
+
+    // The legacy encodings have no way to say it: only the shape is dropped.
+    term.print("\x1b]22;pointer\x1b\\\x1b[?1016l\x1b[?1006l");
+    term.mouse_leave().unwrap();
+    assert_eq!(sent.take(&mut term), "");
+    assert_eq!(term.mouse_pointer_shape(), None);
+
+    // Mouse reporting off: nothing to report either.
+    term.print("\x1b[?1006h\x1b[?1003l");
+    term.mouse_leave().unwrap();
+    assert_eq!(sent.take(&mut term), "");
+
+    // Reset mode and full reset turn it off.
+    term.print("\x1b[?1003h\x1b[?8800l");
+    term.mouse_leave().unwrap();
+    assert_eq!(sent.take(&mut term), "");
+    term.print("\x1b[?8800h\x1bc");
+    assert!(!term.mouse_leave_report_enabled());
 }

@@ -961,6 +961,11 @@ pub enum DecPrivateModeCode {
     /// xterm: adjust cursor positioning after emitting sixel
     SixelScrollsRight = 8452,
 
+    /// Hivegrid fork: the terminal reports the pointer leaving the pane as one SGR motion
+    /// report at column 0, row 0 (`CSI < 35 ; 0 ; 0 M`). Does not enable mouse reporting
+    /// itself. Stock WezTerm ignores it.
+    MouseLeaveReport = 8800,
+
     /// Windows Terminal: win32-input-mode
     /// <https://github.com/microsoft/terminal/blob/main/doc/specs/%234999%20-%20Improved%20keyboard%20handling%20in%20Conpty.md>
     Win32InputMode = 9001,
