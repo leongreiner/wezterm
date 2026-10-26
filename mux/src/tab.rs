@@ -2000,6 +2000,9 @@ impl TabInner {
                 false
             };
 
+            // `resize` below also overwrites `self.size`; the tab is still as big as before
+            // once the new pane is in, so the size is put back after the split.
+            let full_size = self.size;
             if needs_resize {
                 // Pre-emptively resize the tab contents down to
                 // match the target size; it's easier to reuse
@@ -2026,6 +2029,7 @@ impl TabInner {
                         };
 
                         self.pane.replace(cursor.tree());
+                        self.size = full_size;
 
                         let pane_index = if request.target_is_second {
                             self.pane.as_ref().unwrap().num_leaves().saturating_sub(1)
