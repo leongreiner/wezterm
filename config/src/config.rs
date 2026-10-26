@@ -535,6 +535,12 @@ pub struct Config {
     #[dynamic(default)]
     pub tab_bar_separator_color: Option<RgbaColor>,
 
+    /// Draw tabs and the "+" button of the fancy tab bar as rounded chips as
+    /// tall as the status boxes (`tab_bar_status_scale`), centred in the bar
+    /// like them, instead of boxes rising from the bar's lower edge.
+    #[dynamic(default)]
+    pub tab_bar_floating_tabs: bool,
+
     /// A drawn mark at the left end of the fancy tab bar; absent: none.
     #[dynamic(default)]
     pub tab_bar_brand: Option<TabBarBrand>,

@@ -90,7 +90,10 @@ impl crate::TermWindow {
             .to_linear()
             .into(),
         };
-        let tab_vertical_alignment = if self.config.tab_bar_at_bottom {
+        let floating_tabs = self.config.tab_bar_floating_tabs;
+        let tab_vertical_alignment = if floating_tabs {
+            VerticalAlign::Middle
+        } else if self.config.tab_bar_at_bottom {
             VerticalAlign::Top
         } else {
             VerticalAlign::Bottom
@@ -413,6 +416,9 @@ impl crate::TermWindow {
                 }
                 TabBarItem::Tab { tab_idx, active } => {
                     let mut elem = item_to_elem(item);
+                    if floating_tabs {
+                        elem = floating_tab(elem, self.config.tab_bar_status_scale, 1., 0.);
+                    }
                     elem.max_width = Some(Dimension::Pixels(max_tab_width));
                     elem.content = match elem.content {
                         ElementContent::Text(_) => unreachable!(),
@@ -426,6 +432,12 @@ impl crate::TermWindow {
                     };
                     left_eles.push(elem);
                 }
+                TabBarItem::NewTabButton if floating_tabs => left_eles.push(floating_tab(
+                    item_to_elem(item),
+                    self.config.tab_bar_status_scale,
+                    0.5,
+                    0.5,
+                )),
                 _ => left_eles.push(item_to_elem(item)),
             }
         }
@@ -635,4 +647,35 @@ fn make_x_button(
         top: Dimension::Cells(0.),
         bottom: Dimension::Cells(0.),
     })
+}
+
+/// Restyles a tab or the "+" button as a rounded chip as tall as the status
+/// boxes (`status_scale` cells), centred in the bar, so its text shares a
+/// line with theirs. `content_cells` is the height of the element's content.
+fn floating_tab(elem: Element, status_scale: f64, content_cells: f32, margin_left: f32) -> Element {
+    let pad = ((status_scale as f32 - content_cells) / 2.).max(0.);
+    let corner = |poly| SizedPoly {
+        width: Dimension::Cells(0.5),
+        height: Dimension::Cells(0.5),
+        poly,
+    };
+    elem.vertical_align(VerticalAlign::Middle)
+        .margin(BoxDimension {
+            left: Dimension::Cells(margin_left),
+            right: Dimension::Cells(0.),
+            top: Dimension::Cells(0.),
+            bottom: Dimension::Cells(0.),
+        })
+        .padding(BoxDimension {
+            left: Dimension::Cells(0.5),
+            right: Dimension::Cells(0.5),
+            top: Dimension::Cells(pad),
+            bottom: Dimension::Cells(pad),
+        })
+        .border_corners(Some(Corners {
+            top_left: corner(TOP_LEFT_ROUNDED_CORNER),
+            top_right: corner(TOP_RIGHT_ROUNDED_CORNER),
+            bottom_left: corner(BOTTOM_LEFT_ROUNDED_CORNER),
+            bottom_right: corner(BOTTOM_RIGHT_ROUNDED_CORNER),
+        }))
 }

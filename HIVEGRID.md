@@ -23,7 +23,8 @@ on top of upstream; `origin` is the private fork, `upstream` is wezterm/wezterm.
 - `tab_bar_brand`: a drawn honeycomb mark (seven coloured hexagons) at the left end of the
   fancy tab bar, clickable as the status-click id `brand`; the polys are static shapes in
   `termwindow/render/brand_mark_shapes.rs`, rendered through `ElementContent::Mark`.
-  Stock WezTerm rejects the option: set it with `pcall`.
+  `tab_bar_floating_tabs` draws tabs and "+" as rounded chips centred in the bar, level
+  with the status boxes. Both are rejected by stock WezTerm: set them with `pcall`.
 
 ## Build without sudo
 
