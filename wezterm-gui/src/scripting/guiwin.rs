@@ -109,7 +109,7 @@ impl UserData for GuiWin {
         methods.add_async_method("get_dimensions", |_, this, _: ()| async move {
             let (tx, rx) = smol::channel::bounded(1);
             this.window.notify(TermWindowNotif::GetDimensions(tx));
-            let (dims, window_state) = rx
+            let (dims, window_state, content) = rx
                 .recv()
                 .await
                 .map_err(|e| anyhow::anyhow!("{:#}", e))
@@ -121,6 +121,9 @@ impl UserData for GuiWin {
                 pixel_height: usize,
                 dpi: usize,
                 is_full_screen: bool,
+                tab_bar_height: usize,
+                content_top: usize,
+                content_bottom: usize,
             }
             impl_lua_conversion_dynamic!(Dims);
 
@@ -129,6 +132,11 @@ impl UserData for GuiWin {
                 pixel_height: dims.pixel_height,
                 dpi: dims.dpi,
                 is_full_screen: window_state.contains(WindowState::FULL_SCREEN),
+                // Hivegrid: where the pane area starts and its last text row ends, in
+                // pixels from the top of the window, and the tab bar's height (0 when hidden)
+                tab_bar_height: content.tab_bar_height,
+                content_top: content.content_top,
+                content_bottom: content.content_bottom,
                 // FIXME: expose other states here
             };
             Ok(dims)

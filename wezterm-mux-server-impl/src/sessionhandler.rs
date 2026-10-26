@@ -987,7 +987,7 @@ impl SessionHandler {
                                 }
                             };
 
-                            tab.adjust_pane_size(direction, amount);
+                            tab.adjust_pane_size_of(pane_id, direction, amount);
                             Ok(Pdu::UnitResponse(UnitResponse {}))
                         },
                         send_response,

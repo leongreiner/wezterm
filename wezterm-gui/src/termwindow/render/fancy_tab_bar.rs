@@ -172,13 +172,15 @@ impl crate::TermWindow {
                     bottom: Dimension::Cells(0.25),
                 })
                 .border(BoxDimension::new(Dimension::Pixels(1.)))
+                // The border takes the fill colour: with tab_bar_floating_tabs the rounded
+                // corners are drawn in the border colour, and the default one notched them.
                 .colors(ElementColors {
-                    border: BorderColor::default(),
+                    border: BorderColor::new(new_tab.bg_color.to_linear()),
                     bg: new_tab.bg_color.to_linear().into(),
                     text: new_tab.fg_color.to_linear().into(),
                 })
                 .hover_colors(Some(ElementColors {
-                    border: BorderColor::default(),
+                    border: BorderColor::new(new_tab_hover.bg_color.to_linear()),
                     bg: new_tab_hover.bg_color.to_linear().into(),
                     text: new_tab_hover.fg_color.to_linear().into(),
                 })),
@@ -433,11 +435,12 @@ impl crate::TermWindow {
                     };
                     left_eles.push(elem);
                 }
+                // 0.75 cell from the last tab: at 0.5 the "+" chip crowded the active tab.
                 TabBarItem::NewTabButton if floating_tabs => left_eles.push(floating_tab(
                     item_to_elem(item),
                     self.config.tab_bar_status_scale,
                     0.5,
-                    0.5,
+                    0.75,
                 )),
                 _ => left_eles.push(item_to_elem(item)),
             }

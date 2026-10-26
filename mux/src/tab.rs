@@ -41,7 +41,6 @@ struct TabInner {
     id: TabId,
     pane: Option<Tree>,
     size: TerminalSize,
-    size_before_zoom: TerminalSize,
     active: usize,
     zoomed: Option<Arc<dyn Pane>>,
     title: String,
@@ -316,7 +315,7 @@ where
 
 /// Computes the minimum (x, y) size based on the panes in this portion
 /// of the tree.
-fn compute_min_size(tree: &mut Tree) -> (usize, usize) {
+fn compute_min_size(tree: &Tree) -> (usize, usize) {
     match tree {
         Tree::Node { data: None, .. } | Tree::Empty => (1, 1),
         Tree::Node {
@@ -324,8 +323,8 @@ fn compute_min_size(tree: &mut Tree) -> (usize, usize) {
             right,
             data: Some(data),
         } => {
-            let (left_x, left_y) = compute_min_size(&mut *left);
-            let (right_x, right_y) = compute_min_size(&mut *right);
+            let (left_x, left_y) = compute_min_size(left);
+            let (right_x, right_y) = compute_min_size(right);
             match data.direction {
                 SplitDirection::Vertical => (left_x.max(right_x), left_y + right_y + 1),
                 SplitDirection::Horizontal => (left_x + right_x + 1, left_y.max(right_y)),
@@ -333,6 +332,169 @@ fn compute_min_size(tree: &mut Tree) -> (usize, usize) {
         }
         Tree::Leaf(_) => (1, 1),
     }
+}
+
+/// True for a leaf whose pane asked to keep its width when the tab is resized: the user var
+/// `hivegrid_fixed_width` (the Hivegrid sidebar bar, sidebar views and overview dock), and for
+/// a split whose leaves all did (the bar with a sidebar view beside it).
+fn is_fixed_width(tree: &Tree) -> bool {
+    match tree {
+        Tree::Leaf(pane) => pane.copy_user_vars().contains_key("hivegrid_fixed_width"),
+        Tree::Node {
+            left,
+            right,
+            data: Some(_),
+        } => is_fixed_width(left) && is_fixed_width(right),
+        _ => false,
+    }
+}
+
+/// True for a Hivegrid chrome pane: one that set the user var `hivegrid_chrome` or
+/// `hivegrid_fixed_width`. Chrome stays visible while another pane is zoomed.
+fn is_chrome_pane(pane: &Arc<dyn Pane>) -> bool {
+    let vars = pane.copy_user_vars();
+    vars.contains_key("hivegrid_chrome") || vars.contains_key("hivegrid_fixed_width")
+}
+
+/// True for a subtree made of chrome panes only.
+fn is_all_chrome(tree: &Tree) -> bool {
+    match tree {
+        Tree::Leaf(pane) => is_chrome_pane(pane),
+        Tree::Node {
+            left,
+            right,
+            data: Some(_),
+        } => is_all_chrome(left) && is_all_chrome(right),
+        _ => false,
+    }
+}
+
+/// A rectangle of cells within a tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CellRect {
+    left: usize,
+    top: usize,
+    cols: usize,
+    rows: usize,
+}
+
+impl CellRect {
+    fn contains(&self, left: usize, top: usize) -> bool {
+        left >= self.left
+            && left < self.left + self.cols
+            && top >= self.top
+            && top < self.top + self.rows
+    }
+}
+
+/// The part of a tab of `size` that is not chrome: from the root, every split with a
+/// chrome-only subtree on one side is stepped over to the other side. None when the root is
+/// not such a split (no chrome at the edges of the tab).
+fn non_chrome_area(tree: &Tree, size: &TerminalSize) -> Option<CellRect> {
+    let mut area = CellRect {
+        left: 0,
+        top: 0,
+        cols: size.cols,
+        rows: size.rows,
+    };
+    let mut node = tree;
+    let mut stepped = false;
+    while let Tree::Node {
+        left,
+        right,
+        data: Some(data),
+    } = node
+    {
+        match (is_all_chrome(left), is_all_chrome(right)) {
+            (true, false) => {
+                area.left += data.left_of_second();
+                area.top += data.top_of_second();
+                area.cols = data.second.cols;
+                area.rows = data.second.rows;
+                node = right;
+            }
+            (false, true) => {
+                area.cols = data.first.cols;
+                area.rows = data.first.rows;
+                node = left;
+            }
+            _ => break,
+        }
+        stepped = true;
+    }
+    stepped.then_some(area)
+}
+
+/// The number of panes side by side along `direction` (columns for Horizontal, rows for
+/// Vertical) in the widest/tallest part of a subtree.
+fn spans(tree: &Tree, direction: SplitDirection) -> usize {
+    match tree {
+        Tree::Node {
+            left,
+            right,
+            data: Some(data),
+        } => {
+            let (l, r) = (spans(left, direction), spans(right, direction));
+            if data.direction == direction {
+                l + r
+            } else {
+                l.max(r)
+            }
+        }
+        _ => 1,
+    }
+}
+
+/// Splits a size change of `delta` cells between the two sides of a split, each given as
+/// (current size, minimum size, fixed, panes side by side). The sides change in proportion
+/// to their sizes, so the columns of a grid stay equal however the tree is nested (upstream
+/// alternated single cells between the sides, which left the first column of a nested grid
+/// with half of the change); the cell the proportion leaves over goes where the panes stay
+/// most even (a shrink to the side with the wider panes on average), so a resize in steps of
+/// one cell does not all land on the last column. A fixed side takes no share while the
+/// other side can absorb the change. Neither side goes below its minimum. Returns the
+/// (first, second) deltas.
+fn share_delta(
+    delta: isize,
+    (first, first_min, first_fixed, first_n): (usize, usize, bool, usize),
+    (second, second_min, second_fixed, second_n): (usize, usize, bool, usize),
+) -> (isize, isize) {
+    let (first, second) = (first as isize, second as isize);
+    let (first_floor, second_floor) = (first_min as isize - first, second_min as isize - second);
+    let mut a = match (first_fixed, second_fixed) {
+        (true, false) => 0,
+        (false, true) => delta,
+        // Both fixed (a chrome-only subtree that has to take a change, e.g. a dragged divider
+        // between a sidebar view and the grid): the wider side takes it, the narrow bar keeps
+        // its width.
+        (true, true) if first >= second => delta,
+        (true, true) => 0,
+        _ if first + second > 0 => {
+            let a = delta * first / (first + second);
+            let b = delta * second / (first + second);
+            let rest = delta - a - b;
+            // average pane size of each side after the proportional share (dividers between
+            // its panes excluded), cross-multiplied
+            let (first_n, second_n) = (first_n as isize, second_n as isize);
+            let (avg_a, avg_b) = (
+                (first + a - (first_n - 1)) * second_n,
+                (second + b - (second_n - 1)) * first_n,
+            );
+            if (rest < 0 && avg_a > avg_b) || (rest > 0 && avg_a < avg_b) {
+                a + rest
+            } else {
+                a
+            }
+        }
+        _ => delta / 2,
+    }
+    .max(first_floor);
+    let mut b = delta - a;
+    if b < second_floor {
+        b = second_floor;
+        a = (delta - b).max(first_floor);
+    }
+    (a, b)
 }
 
 fn adjust_x_size(tree: &mut Tree, mut x_adjust: isize, cell_dimensions: &TerminalSize) {
@@ -367,37 +529,37 @@ fn adjust_x_size(tree: &mut Tree, mut x_adjust: isize, cell_dimensions: &Termina
                         }
                         return;
                     }
-                    SplitDirection::Horizontal if x_adjust > 0 => {
-                        adjust_x_size(&mut *left, 1, cell_dimensions);
-                        data.first.cols += 1;
-                        data.first.pixel_width =
-                            data.first.cols.saturating_mul(cell_dimensions.pixel_width);
-                        x_adjust -= 1;
-
-                        if x_adjust > 0 {
-                            adjust_x_size(&mut *right, 1, cell_dimensions);
-                            data.second.cols += 1;
-                            data.second.pixel_width =
-                                data.second.cols.saturating_mul(cell_dimensions.pixel_width);
-                            x_adjust -= 1;
-                        }
-                    }
                     SplitDirection::Horizontal => {
-                        // x_adjust is negative
-                        if data.first.cols > 1 {
-                            adjust_x_size(&mut *left, -1, cell_dimensions);
-                            data.first.cols -= 1;
+                        let (first_min, _) = compute_min_size(left);
+                        let (second_min, _) = compute_min_size(right);
+                        let (first_delta, second_delta) = share_delta(
+                            x_adjust,
+                            (
+                                data.first.cols,
+                                first_min,
+                                is_fixed_width(left),
+                                spans(left, SplitDirection::Horizontal),
+                            ),
+                            (
+                                data.second.cols,
+                                second_min,
+                                is_fixed_width(right),
+                                spans(right, SplitDirection::Horizontal),
+                            ),
+                        );
+                        if first_delta != 0 {
+                            adjust_x_size(&mut *left, first_delta, cell_dimensions);
+                            data.first.cols = (data.first.cols as isize + first_delta) as usize;
                             data.first.pixel_width =
                                 data.first.cols.saturating_mul(cell_dimensions.pixel_width);
-                            x_adjust += 1;
                         }
-                        if x_adjust < 0 && data.second.cols > 1 {
-                            adjust_x_size(&mut *right, -1, cell_dimensions);
-                            data.second.cols -= 1;
+                        if second_delta != 0 {
+                            adjust_x_size(&mut *right, second_delta, cell_dimensions);
+                            data.second.cols = (data.second.cols as isize + second_delta) as usize;
                             data.second.pixel_width =
                                 data.second.cols.saturating_mul(cell_dimensions.pixel_width);
-                            x_adjust += 1;
                         }
+                        return;
                     }
                 }
             }
@@ -437,40 +599,37 @@ fn adjust_y_size(tree: &mut Tree, mut y_adjust: isize, cell_dimensions: &Termina
                         }
                         return;
                     }
-                    SplitDirection::Vertical if y_adjust > 0 => {
-                        adjust_y_size(&mut *left, 1, cell_dimensions);
-                        data.first.rows += 1;
-                        data.first.pixel_height =
-                            data.first.rows.saturating_mul(cell_dimensions.pixel_height);
-                        y_adjust -= 1;
-                        if y_adjust > 0 {
-                            adjust_y_size(&mut *right, 1, cell_dimensions);
-                            data.second.rows += 1;
-                            data.second.pixel_height = data
-                                .second
-                                .rows
-                                .saturating_mul(cell_dimensions.pixel_height);
-                            y_adjust -= 1;
-                        }
-                    }
                     SplitDirection::Vertical => {
-                        // y_adjust is negative
-                        if data.first.rows > 1 {
-                            adjust_y_size(&mut *left, -1, cell_dimensions);
-                            data.first.rows -= 1;
+                        let (_, first_min) = compute_min_size(left);
+                        let (_, second_min) = compute_min_size(right);
+                        let (first_delta, second_delta) = share_delta(
+                            y_adjust,
+                            (
+                                data.first.rows,
+                                first_min,
+                                false,
+                                spans(left, SplitDirection::Vertical),
+                            ),
+                            (
+                                data.second.rows,
+                                second_min,
+                                false,
+                                spans(right, SplitDirection::Vertical),
+                            ),
+                        );
+                        if first_delta != 0 {
+                            adjust_y_size(&mut *left, first_delta, cell_dimensions);
+                            data.first.rows = (data.first.rows as isize + first_delta) as usize;
                             data.first.pixel_height =
                                 data.first.rows.saturating_mul(cell_dimensions.pixel_height);
-                            y_adjust += 1;
                         }
-                        if y_adjust < 0 && data.second.rows > 1 {
-                            adjust_y_size(&mut *right, -1, cell_dimensions);
-                            data.second.rows -= 1;
-                            data.second.pixel_height = data
-                                .second
-                                .rows
-                                .saturating_mul(cell_dimensions.pixel_height);
-                            y_adjust += 1;
+                        if second_delta != 0 {
+                            adjust_y_size(&mut *right, second_delta, cell_dimensions);
+                            data.second.rows = (data.second.rows as isize + second_delta) as usize;
+                            data.second.pixel_height =
+                                data.second.rows.saturating_mul(cell_dimensions.pixel_height);
                         }
+                        return;
                     }
                 }
             }
@@ -478,7 +637,8 @@ fn adjust_y_size(tree: &mut Tree, mut y_adjust: isize, cell_dimensions: &Termina
     }
 }
 
-fn apply_sizes_from_splits(tree: &Tree, size: &TerminalSize) {
+/// Resizes every pane to its size in the tree, except `skip` (the zoomed pane, sized apart).
+fn apply_sizes_from_splits(tree: &Tree, size: &TerminalSize, skip: Option<PaneId>) {
     match tree {
         Tree::Empty => return,
         Tree::Node { data: None, .. } => return,
@@ -487,11 +647,53 @@ fn apply_sizes_from_splits(tree: &Tree, size: &TerminalSize) {
             right,
             data: Some(data),
         } => {
-            apply_sizes_from_splits(&*left, &data.first);
-            apply_sizes_from_splits(&*right, &data.second);
+            apply_sizes_from_splits(&*left, &data.first, skip);
+            apply_sizes_from_splits(&*right, &data.second, skip);
         }
         Tree::Leaf(pane) => {
-            pane.resize(*size).ok();
+            if Some(pane.pane_id()) != skip {
+                resize_if_changed(pane, *size);
+            }
+        }
+    }
+}
+
+/// Resizes a pane unless it already has that size: a terminal resize rewraps the whole
+/// scrollback, and the split tree is applied to every pane after any divider move.
+fn resize_if_changed(pane: &Arc<dyn Pane>, size: TerminalSize) {
+    let dims = pane.get_dimensions();
+    if dims.cols != size.cols
+        || dims.viewport_rows != size.rows
+        || dims.pixel_width != size.pixel_width
+        || dims.pixel_height != size.pixel_height
+        || dims.dpi != size.dpi
+    {
+        pane.resize(size).ok();
+    }
+}
+
+/// Makes every split fit the size its parent gives it, after a divider moved: the change is
+/// shared out with `adjust_x_size`/`adjust_y_size` (in proportion, fixed-width chrome kept,
+/// never below a subtree's minimum). Upstream kept the first side of each split and squeezed
+/// the second, so a side that could not shrink (a 3-column grid next to the dock) overflowed
+/// the tab and pushed the panes after it out of the window.
+fn fit_subtrees(tree: &mut Tree, cell_dimensions: &TerminalSize) {
+    if let Tree::Node {
+        left,
+        right,
+        data: Some(data),
+    } = tree
+    {
+        for (child, want) in [(&mut **left, data.first), (&mut **right, data.second)] {
+            if let Tree::Node {
+                data: Some(have), ..
+            } = child
+            {
+                let (cols, rows) = (have.width(), have.height());
+                adjust_x_size(child, want.cols as isize - cols as isize, cell_dimensions);
+                adjust_y_size(child, want.rows as isize - rows as isize, cell_dimensions);
+            }
+            fit_subtrees(child, cell_dimensions);
         }
     }
 }
@@ -646,6 +848,12 @@ impl Tab {
         self.inner.lock().adjust_pane_size(direction, amount)
     }
 
+    /// Like adjust_pane_size, for the pane `pane_id` instead of the active one (`wezterm cli
+    /// adjust-pane-size --pane-id` resized the active pane whatever id it was given).
+    pub fn adjust_pane_size_of(&self, pane_id: PaneId, direction: PaneDirection, amount: usize) {
+        self.inner.lock().adjust_pane_size_of(pane_id, direction, amount)
+    }
+
     /// Activate an adjacent pane in the specified direction.
     /// In cases where there are multiple adjacent panes in the
     /// intended direction, we take the pane that has the largest
@@ -759,7 +967,6 @@ impl TabInner {
             id: TAB_ID.fetch_add(1, ::std::sync::atomic::Ordering::Relaxed),
             pane: Some(Tree::new()),
             size: *size,
-            size_before_zoom: *size,
             active: 0,
             zoomed: None,
             title: String::new(),
@@ -889,26 +1096,90 @@ impl TabInner {
     }
 
     fn toggle_zoom(&mut self) {
-        let size = self.size;
-        if self.zoomed.take().is_some() {
-            // We were zoomed, but now we are not.
-            // Re-apply the size to the panes
-            if let Some(pane) = self.get_active_pane() {
-                pane.set_zoomed(false);
+        if let Some(pane) = self.zoomed.take() {
+            // We were zoomed, but now we are not. The split tree kept the layout (and
+            // followed tab resizes) while zoomed, so only the zoomed pane needs its place back.
+            pane.set_zoomed(false);
+            if let Some(pos) = self
+                .iter_panes_ignoring_zoom()
+                .into_iter()
+                .find(|p| p.pane.pane_id() == pane.pane_id())
+            {
+                pane.resize(TerminalSize {
+                    cols: pos.width,
+                    rows: pos.height,
+                    pixel_width: pos.pixel_width,
+                    pixel_height: pos.pixel_height,
+                    dpi: self.size.dpi,
+                })
+                .ok();
             }
-            self.size = self.size_before_zoom;
-            self.resize(size);
-        } else {
-            // We weren't zoomed, but now we want to zoom.
-            // Locate the active pane
-            self.size_before_zoom = size;
-            if let Some(pane) = self.get_active_pane() {
-                pane.set_zoomed(true);
-                pane.resize(size).ok();
-                self.zoomed.replace(pane);
-            }
+        } else if let Some(pane) = self.get_active_pane() {
+            // We weren't zoomed, but now we want to zoom the active pane.
+            pane.set_zoomed(true);
+            self.zoomed.replace(pane);
+            self.apply_zoom_size();
         }
         Mux::try_get().map(|mux| mux.notify(MuxNotification::TabResized(self.id)));
+    }
+
+    /// Where the zoomed pane goes when the tab has Hivegrid chrome (see `is_chrome_pane`)
+    /// at its edges: the rest of the tab, so the chrome keeps its place and size beside the
+    /// zoomed pane. None for the whole tab (upstream zoom): not zoomed, no chrome at the
+    /// edges, or the zoomed pane is chrome itself.
+    fn zoom_area(&self) -> Option<CellRect> {
+        let zoomed = self.zoomed.as_ref()?;
+        if is_chrome_pane(zoomed) {
+            return None;
+        }
+        non_chrome_area(self.pane.as_ref()?, &self.size)
+    }
+
+    /// The size of the zoomed pane: its zoom area, or the whole tab.
+    fn zoomed_size(&self, area: Option<CellRect>) -> TerminalSize {
+        match area {
+            Some(area) => {
+                let cell = self.cell_dimensions();
+                TerminalSize {
+                    cols: area.cols,
+                    rows: area.rows,
+                    pixel_width: area.cols * cell.pixel_width,
+                    pixel_height: area.rows * cell.pixel_height,
+                    dpi: cell.dpi,
+                }
+            }
+            None => self.size,
+        }
+    }
+
+    /// Gives the zoomed pane its size after a change of the tab size or of the tree, and
+    /// keeps the active pane among the visible ones.
+    fn apply_zoom_size(&mut self) {
+        let Some(zoomed) = self.zoomed.clone() else {
+            return;
+        };
+        let area = self.zoom_area();
+        zoomed.resize(self.zoomed_size(area)).ok();
+        if area.is_some() {
+            // With chrome beside the zoomed pane the active pane may be a chrome pane; when
+            // that one is gone or no longer visible, the zoomed pane is active again.
+            let panes = self.iter_panes();
+            if !panes.iter().any(|p| p.is_active) {
+                if let Some(p) = panes.iter().find(|p| p.is_zoomed) {
+                    self.active = p.index;
+                }
+            }
+        }
+    }
+
+    /// Resizes the panes to their sizes in the split tree, the zoomed pane to its zoom size.
+    fn apply_sizes(&mut self) {
+        let zoomed = self.zoomed.as_ref().map(|p| p.pane_id());
+        let size = self.size;
+        if let Some(root) = self.pane.as_ref() {
+            apply_sizes_from_splits(root, &size, zoomed);
+        }
+        self.apply_zoom_size();
     }
 
     fn contains_pane(&self, pane: PaneId) -> bool {
@@ -960,8 +1231,7 @@ impl TabInner {
                 Ok(c) => cursor = c,
                 Err(c) => {
                     self.pane.replace(c.tree());
-                    let size = self.size;
-                    apply_sizes_from_splits(self.pane.as_mut().unwrap(), &size);
+                    self.apply_sizes();
                     break;
                 }
             }
@@ -991,8 +1261,7 @@ impl TabInner {
                 Ok(c) => cursor = c,
                 Err(c) => {
                     self.pane.replace(c.tree());
-                    let size = self.size;
-                    apply_sizes_from_splits(self.pane.as_mut().unwrap(), &size);
+                    self.apply_sizes();
                     break;
                 }
             }
@@ -1003,9 +1272,11 @@ impl TabInner {
     fn iter_panes_impl(&mut self, respect_zoom_state: bool) -> Vec<PositionedPane> {
         let mut panes = vec![];
 
-        if respect_zoom_state {
-            if let Some(zoomed) = self.zoomed.as_ref() {
-                let size = self.size;
+        if respect_zoom_state && self.zoomed.is_some() {
+            let zoomed_id = self.zoomed.as_ref().map(|p| p.pane_id());
+            let area = self.zoom_area();
+            let size = self.zoomed_size(area);
+            let Some(area) = area else {
                 panes.push(PositionedPane {
                     index: 0,
                     is_active: true,
@@ -1016,10 +1287,23 @@ impl TabInner {
                     pixel_width: size.pixel_width.into(),
                     height: size.rows.into(),
                     pixel_height: size.pixel_height.into(),
-                    pane: Arc::clone(zoomed),
+                    pane: Arc::clone(self.zoomed.as_ref().unwrap()),
                 });
                 return panes;
+            };
+            // Chrome keeps its place; the zoomed pane fills the rest, the other panes are
+            // hidden. Indices stay those of the whole tree.
+            let mut panes = self.iter_panes_impl(false);
+            panes.retain(|p| Some(p.pane.pane_id()) == zoomed_id || !area.contains(p.left, p.top));
+            for p in panes.iter_mut().filter(|p| p.is_zoomed) {
+                p.left = area.left;
+                p.top = area.top;
+                p.width = size.cols;
+                p.height = size.rows;
+                p.pixel_width = size.pixel_width;
+                p.pixel_height = size.pixel_height;
             }
+            return panes;
         }
 
         let active_idx = self.active;
@@ -1080,9 +1364,12 @@ impl TabInner {
 
     fn iter_splits(&mut self) -> Vec<PositionedSplit> {
         let mut dividers = vec![];
-        if self.zoomed.is_some() {
-            return dividers;
-        }
+        // While zoomed, only the dividers beside chrome (outside the zoom area) are visible.
+        let hidden = match (self.zoomed.is_some(), self.zoom_area()) {
+            (false, _) => None,
+            (true, None) => return dividers,
+            (true, Some(area)) => Some(area),
+        };
 
         let mut cursor = self.pane.take().unwrap().cursor();
         let mut index = 0;
@@ -1129,6 +1416,9 @@ impl TabInner {
             }
         }
 
+        if let Some(area) = hidden {
+            dividers.retain(|s| !area.contains(s.left, s.top));
+        }
         dividers
     }
 
@@ -1142,42 +1432,39 @@ impl TabInner {
             return;
         }
 
-        if let Some(zoomed) = &self.zoomed {
-            self.size = size;
-            zoomed.resize(size).ok();
-        } else {
-            let dims = cell_dimensions(&size);
-            let (min_x, min_y) = compute_min_size(self.pane.as_mut().unwrap());
-            let current_size = self.size;
+        let dims = cell_dimensions(&size);
+        let (min_x, min_y) = compute_min_size(self.pane.as_mut().unwrap());
+        let current_size = self.size;
 
-            // Constrain the new size to the minimum possible dimensions
-            let cols = size.cols.max(min_x);
-            let rows = size.rows.max(min_y);
-            let size = TerminalSize {
-                rows,
-                cols,
-                pixel_width: cols * dims.pixel_width,
-                pixel_height: rows * dims.pixel_height,
-                dpi: dims.dpi,
-            };
+        // Constrain the new size to the minimum possible dimensions
+        let cols = size.cols.max(min_x);
+        let rows = size.rows.max(min_y);
+        let size = TerminalSize {
+            rows,
+            cols,
+            pixel_width: cols * dims.pixel_width,
+            pixel_height: rows * dims.pixel_height,
+            dpi: dims.dpi,
+        };
 
-            // Update the split nodes with adjusted sizes
-            adjust_x_size(
-                self.pane.as_mut().unwrap(),
-                cols as isize - current_size.cols as isize,
-                &dims,
-            );
-            adjust_y_size(
-                self.pane.as_mut().unwrap(),
-                rows as isize - current_size.rows as isize,
-                &dims,
-            );
+        // Update the split nodes with adjusted sizes; the tree follows the tab size while a
+        // pane is zoomed too, so chrome beside the zoomed pane and the layout restored on
+        // unzoom are right.
+        adjust_x_size(
+            self.pane.as_mut().unwrap(),
+            cols as isize - current_size.cols as isize,
+            &dims,
+        );
+        adjust_y_size(
+            self.pane.as_mut().unwrap(),
+            rows as isize - current_size.rows as isize,
+            &dims,
+        );
 
-            self.size = size;
+        self.size = size;
 
-            // And then resize the individual panes to match
-            apply_sizes_from_splits(self.pane.as_mut().unwrap(), &size);
-        }
+        // And then resize the individual panes to match
+        self.apply_sizes();
 
         Mux::try_get().map(|mux| mux.notify(MuxNotification::TabResized(self.id)));
     }
@@ -1259,7 +1546,8 @@ impl TabInner {
     }
 
     fn resize_split_by(&mut self, split_index: usize, delta: isize) {
-        if self.zoomed.is_some() {
+        // While zoomed, only a divider beside chrome can be moved.
+        if self.zoomed.is_some() && !self.iter_splits().iter().any(|s| s.index == split_index) {
             return;
         }
 
@@ -1293,6 +1581,12 @@ impl TabInner {
 
     fn adjust_node_at_cursor(&mut self, cursor: &mut Cursor, delta: isize) {
         let cell_dimensions = self.cell_dimensions();
+        // Neither side goes below the minimum size of its subtree (upstream only kept one
+        // cell, so a nested side could be asked to be smaller than it can be).
+        let ((first_min_x, first_min_y), (second_min_x, second_min_y)) = match cursor.subtree() {
+            Tree::Node { left, right, .. } => (compute_min_size(left), compute_min_size(right)),
+            _ => ((1, 1), (1, 1)),
+        };
         if let Ok(Some(node)) = cursor.node_mut() {
             match node.direction {
                 SplitDirection::Horizontal => {
@@ -1301,8 +1595,8 @@ impl TabInner {
                     let mut cols = node.first.cols as isize;
                     cols = cols
                         .saturating_add(delta)
-                        .max(1)
-                        .min((width as isize).saturating_sub(2));
+                        .min((width as isize).saturating_sub(1 + second_min_x as isize))
+                        .max(first_min_x as isize);
                     node.first.cols = cols as usize;
                     node.first.pixel_width =
                         node.first.cols.saturating_mul(cell_dimensions.pixel_width);
@@ -1317,8 +1611,8 @@ impl TabInner {
                     let mut rows = node.first.rows as isize;
                     rows = rows
                         .saturating_add(delta)
-                        .max(1)
-                        .min((height as isize).saturating_sub(2));
+                        .min((height as isize).saturating_sub(1 + second_min_y as isize))
+                        .max(first_min_y as isize);
                     node.first.rows = rows as usize;
                     node.first.pixel_height =
                         node.first.rows.saturating_mul(cell_dimensions.pixel_height);
@@ -1333,76 +1627,40 @@ impl TabInner {
         }
     }
 
-    fn cascade_size_from_cursor(&mut self, mut cursor: Cursor) {
-        // Now we need to cascade this down to children
-        match cursor.preorder_next() {
-            Ok(c) => cursor = c,
-            Err(c) => {
-                self.pane.replace(c.tree());
-                return;
-            }
-        }
-        let root_size = self.size;
-
-        loop {
-            // Figure out the available size by looking at our immediate parent node.
-            // If we are the root, look at the provided new size
-            let pane_size = if let Some((branch, Some(parent))) = cursor.path_to_root().next() {
-                if branch == PathBranch::IsRight {
-                    parent.second
-                } else {
-                    parent.first
-                }
-            } else {
-                root_size
-            };
-
-            if cursor.is_leaf() {
-                // Apply our size to the tty
-                cursor.leaf_mut().map(|pane| pane.resize(pane_size));
-            } else {
-                self.apply_pane_size(pane_size, &mut cursor);
-            }
-            match cursor.preorder_next() {
-                Ok(c) => cursor = c,
-                Err(c) => {
-                    self.pane.replace(c.tree());
-                    break;
-                }
-            }
-        }
+    fn cascade_size_from_cursor(&mut self, cursor: Cursor) {
+        // Now the subtrees below the moved divider have to fit their new sizes
+        let mut root = cursor.tree();
+        fit_subtrees(&mut root, &self.cell_dimensions());
+        self.pane.replace(root);
+        self.apply_sizes();
         Mux::try_get().map(|mux| mux.notify(MuxNotification::TabResized(self.id)));
     }
 
     fn adjust_pane_size(&mut self, direction: PaneDirection, amount: usize) {
-        if self.zoomed.is_some() {
+        self.adjust_pane_size_at(self.active, direction, amount)
+    }
+
+    fn adjust_pane_size_of(&mut self, pane_id: PaneId, direction: PaneDirection, amount: usize) {
+        let index = self
+            .iter_panes_ignoring_zoom()
+            .iter()
+            .position(|p| p.pane.pane_id() == pane_id);
+        if let Some(index) = index {
+            self.adjust_pane_size_at(index, direction, amount)
+        }
+    }
+
+    fn adjust_pane_size_at(&mut self, active_index: usize, direction: PaneDirection, amount: usize) {
+        // While zoomed, only a chrome pane beside the zoomed pane can be resized.
+        if self.zoomed.is_some()
+            && !self
+                .iter_panes()
+                .iter()
+                .any(|p| p.index == active_index && !p.is_zoomed)
+        {
             return;
         }
-        let active_index = self.active;
-        let mut cursor = self.pane.take().unwrap().cursor();
-        let mut index = 0;
-
-        // Position cursor on the active leaf
-        loop {
-            if cursor.is_leaf() {
-                if index == active_index {
-                    // Found it
-                    break;
-                }
-                index += 1;
-            }
-            match cursor.preorder_next() {
-                Ok(c) => cursor = c,
-                Err(c) => {
-                    // Didn't find it
-                    self.pane.replace(c.tree());
-                    return;
-                }
-            }
-        }
-
-        // We are on the active leaf.
-        // Now we go up until we find the parent node that is
+        // Now we go up from the leaf until we find the parent node that is
         // aligned with the desired direction.
         let split_direction = match direction {
             PaneDirection::Left | PaneDirection::Right => SplitDirection::Horizontal,
@@ -1414,41 +1672,91 @@ impl TabInner {
             PaneDirection::Up | PaneDirection::Left => -(amount as isize),
             PaneDirection::Next | PaneDirection::Prev => unreachable!(),
         };
+        // A fixed-width pane (the Hivegrid bar, a sidebar view) resized Left/Right moves the
+        // divider on its right edge: the nearest horizontal split it is the first side of. In
+        // bar | view | grid the nearest split of the view is the bar's divider, so its own
+        // width could not be set. Without such a split, the nearest one as for any pane.
+        let mut right_edge_only = split_direction == SplitDirection::Horizontal
+            && self
+                .iter_panes_ignoring_zoom()
+                .get(active_index)
+                .map_or(false, |p| {
+                    p.pane
+                        .copy_user_vars()
+                        .contains_key("hivegrid_fixed_width")
+                });
         loop {
-            match cursor.go_up() {
-                Ok(mut c) => {
-                    if let Ok(Some(node)) = c.node_mut() {
-                        if node.direction == split_direction {
-                            self.adjust_node_at_cursor(&mut c, delta);
-                            self.cascade_size_from_cursor(c);
-                            return;
-                        }
-                    }
-
-                    cursor = c;
-                }
-
+            let mut cursor = match self.pane.take().unwrap().cursor().go_to_nth_leaf(active_index)
+            {
+                Ok(c) => c,
                 Err(c) => {
                     self.pane.replace(c.tree());
                     return;
                 }
+            };
+            loop {
+                let from_first = cursor.is_left();
+                match cursor.go_up() {
+                    Ok(mut c) => {
+                        if let Ok(Some(node)) = c.node_mut() {
+                            if node.direction == split_direction && (from_first || !right_edge_only)
+                            {
+                                self.adjust_node_at_cursor(&mut c, delta);
+                                self.cascade_size_from_cursor(c);
+                                return;
+                            }
+                        }
+                        cursor = c;
+                    }
+                    Err(c) => {
+                        self.pane.replace(c.tree());
+                        break;
+                    }
+                }
             }
+            if !right_edge_only {
+                return;
+            }
+            right_edge_only = false;
         }
     }
 
     fn activate_pane_direction(&mut self, direction: PaneDirection) {
-        if self.zoomed.is_some() {
-            if !configuration().unzoom_on_switch_pane {
-                return;
+        if let Some(target) = self.chrome_zoom_direction(direction) {
+            if let Some(panel_idx) = target {
+                self.set_active_idx(panel_idx);
             }
-            self.toggle_zoom();
-        }
-        if let Some(panel_idx) = self.get_pane_direction(direction, false) {
-            self.set_active_idx(panel_idx);
+        } else {
+            if self.zoomed.is_some() {
+                if !configuration().unzoom_on_switch_pane {
+                    return;
+                }
+                self.toggle_zoom();
+            }
+            if let Some(panel_idx) = self.get_pane_direction(direction, false) {
+                self.set_active_idx(panel_idx);
+            }
         }
         let mux = Mux::get();
         if let Some(window_id) = mux.window_containing_tab(self.id) {
             mux.notify(MuxNotification::WindowInvalidated(window_id));
+        }
+    }
+
+    /// A focus move that keeps the zoom while chrome is visible beside the zoomed pane:
+    /// from the zoomed pane to a chrome pane next to it in the unzoomed layout, or from a
+    /// chrome pane to what is visible in that direction (Some(None): nothing there). None
+    /// when the move is an ordinary one (not zoomed beside chrome, or the zoomed pane's
+    /// neighbour is a hidden pane).
+    fn chrome_zoom_direction(&mut self, direction: PaneDirection) -> Option<Option<usize>> {
+        self.zoom_area()?;
+        let visible = self.iter_panes();
+        let from_zoomed = visible.iter().any(|p| p.is_active && p.is_zoomed);
+        let target = self.get_pane_direction(direction, from_zoomed);
+        match target {
+            Some(idx) if visible.iter().any(|p| p.index == idx) => Some(Some(idx)),
+            None if !from_zoomed => Some(None),
+            _ => None,
         }
     }
 
@@ -1666,12 +1974,14 @@ impl TabInner {
                         };
 
                         if let Some(unsplit) = cursor.leaf_mut() {
-                            unsplit.resize(size).ok();
+                            if Some(unsplit.pane_id()) != zoomed_pane {
+                                unsplit.resize(size).ok();
+                            }
                         } else {
                             self.apply_pane_size(size, &mut cursor);
                         }
-                    } else if !dead_panes.is_empty() {
-                        // Apply our revised size to the tty
+                    } else if !dead_panes.is_empty() && Some(pane.pane_id()) != zoomed_pane {
+                        // Apply our revised size to the tty (the zoomed pane is sized below)
                         pane.resize(pane_size).ok();
                     }
 
@@ -1694,6 +2004,11 @@ impl TabInner {
             let active_idx = self.active;
             removed_indices.retain(|&idx| idx <= active_idx);
             self.active = active_idx.saturating_sub(removed_indices.len());
+        }
+
+        if !dead_panes.is_empty() {
+            // The zoom area may have changed (a chrome pane or a hidden one closed)
+            self.apply_zoom_size();
         }
 
         if !dead_panes.is_empty() && kill {
@@ -1733,8 +2048,14 @@ impl TabInner {
     }
 
     fn get_active_pane(&mut self) -> Option<Arc<dyn Pane>> {
-        if let Some(zoomed) = self.zoomed.as_ref() {
-            return Some(Arc::clone(zoomed));
+        if let Some(zoomed) = self.zoomed.clone() {
+            // Beside chrome, a chrome pane can have the focus while another pane is zoomed.
+            if self.zoom_area().is_some() {
+                if let Some(pos) = self.iter_panes().into_iter().find(|p| p.is_active) {
+                    return Some(pos.pane);
+                }
+            }
+            return Some(zoomed);
         }
 
         self.iter_panes_ignoring_zoom()
@@ -1755,10 +2076,18 @@ impl TabInner {
         }
 
         if self.zoomed.is_some() {
-            if !configuration().unzoom_on_switch_pane {
-                return;
+            // Focusing a pane that is visible beside the zoomed one (chrome) keeps the zoom.
+            let visible = self.zoom_area().is_some()
+                && self
+                    .iter_panes()
+                    .iter()
+                    .any(|p| p.pane.pane_id() == pane.pane_id());
+            if !visible {
+                if !configuration().unzoom_on_switch_pane {
+                    return;
+                }
+                self.toggle_zoom();
             }
-            self.toggle_zoom();
         }
 
         if let Some(item) = self
@@ -1853,8 +2182,7 @@ impl TabInner {
             self.pane.replace(cursor.tree());
 
             // Advise the panes of their new sizes
-            let size = self.size;
-            apply_sizes_from_splits(self.pane.as_mut().unwrap(), &size);
+            self.apply_sizes();
         }
 
         // And update focus
@@ -1889,6 +2217,11 @@ impl TabInner {
             }
         }
 
+        // Ensure that we're not zoomed, otherwise we'll end up in
+        // a bogus split state (https://github.com/wezterm/wezterm/issues/723);
+        // a top-level split (the Hivegrid dock or bar opening) unzooms too.
+        self.set_zoomed(false);
+
         if request.top_level {
             let size = self.size;
 
@@ -1921,10 +2254,6 @@ impl TabInner {
                 },
             });
         }
-
-        // Ensure that we're not zoomed, otherwise we'll end up in
-        // a bogus split state (https://github.com/wezterm/wezterm/issues/723)
-        self.set_zoomed(false);
 
         self.iter_panes().iter().nth(pane_index).map(|pos| {
             let ((width1, width2), (height1, height2)) = match request.direction {
@@ -2027,6 +2356,14 @@ impl TabInner {
                         cursor = match c.assign_node(Some(split_info)) {
                             Err(c) | Ok(c) => c,
                         };
+                        // The new pane gets its slot's size (it was spawned or moved with
+                        // another one, and nothing else resizes it).
+                        pane.resize(if request.target_is_second {
+                            split_info.second
+                        } else {
+                            split_info.first
+                        })
+                        .ok();
 
                         self.pane.replace(cursor.tree());
                         self.size = full_size;
@@ -2214,6 +2551,7 @@ mod test {
     struct FakePane {
         id: PaneId,
         size: Mutex<TerminalSize>,
+        vars: HashMap<String, String>,
     }
 
     impl FakePane {
@@ -2221,7 +2559,26 @@ mod test {
             Arc::new(Self {
                 id,
                 size: Mutex::new(size),
+                vars: HashMap::new(),
             })
+        }
+
+        /// A pane whose size the test can read; `chrome`: a Hivegrid chrome pane (bar, dock)
+        /// with the user var `hivegrid_fixed_width`.
+        fn typed(id: PaneId, size: TerminalSize, chrome: bool) -> Arc<Self> {
+            let mut vars = HashMap::new();
+            if chrome {
+                vars.insert("hivegrid_fixed_width".to_string(), "1".to_string());
+            }
+            Arc::new(Self {
+                id,
+                size: Mutex::new(size),
+                vars,
+            })
+        }
+
+        fn cols(&self) -> usize {
+            self.size.lock().cols
         }
     }
 
@@ -2271,7 +2628,15 @@ mod test {
         }
 
         fn get_dimensions(&self) -> RenderableDimensions {
-            unimplemented!();
+            let size = *self.size.lock();
+            RenderableDimensions {
+                cols: size.cols,
+                viewport_rows: size.rows,
+                pixel_width: size.pixel_width,
+                pixel_height: size.pixel_height,
+                dpi: size.dpi,
+                ..Default::default()
+            }
         }
 
         fn get_title(&self) -> String {
@@ -2317,6 +2682,9 @@ mod test {
         }
         fn get_current_working_dir(&self, _policy: CachePolicy) -> Option<Url> {
             None
+        }
+        fn copy_user_vars(&self) -> HashMap<String, String> {
+            self.vars.clone()
         }
     }
 
@@ -2519,6 +2887,291 @@ mod test {
         assert_eq!(24, panes[2].height);
         assert_eq!(400, panes[2].pixel_width);
         assert_eq!(600, panes[2].pixel_height);
+    }
+
+    #[test]
+    fn share_delta_both_fixed_goes_to_wider_side() {
+        // bar (5) | sidebar view (40), both fixed: the view takes the change
+        assert_eq!(share_delta(10, (5, 1, true, 1), (40, 1, true, 1)), (0, 10));
+        assert_eq!(share_delta(-10, (40, 1, true, 1), (5, 1, true, 1)), (-10, 0));
+        // never below a minimum
+        assert_eq!(share_delta(-10, (5, 1, true, 1), (8, 1, true, 1)), (-3, -7));
+    }
+
+    #[test]
+    fn single_cell_resizes_keep_grid_columns_even() {
+        // one column | two columns: the single cell a shrink leaves over goes to the side with
+        // the wider panes (dividers excluded), a growth to the narrower
+        assert_eq!(share_delta(-1, (62, 1, false, 1), (127, 3, false, 2)), (0, -1));
+        assert_eq!(share_delta(-1, (62, 1, false, 1), (123, 3, false, 2)), (-1, 0));
+        assert_eq!(share_delta(1, (61, 1, false, 1), (125, 3, false, 2)), (1, 0));
+        assert_eq!(share_delta(1, (62, 1, false, 1), (123, 3, false, 2)), (0, 1));
+
+        let size = TerminalSize {
+            rows: 30,
+            cols: 188,
+            pixel_width: 1880,
+            pixel_height: 600,
+            dpi: 96,
+        };
+        let panes = [
+            FakePane::typed(1, size, false),
+            FakePane::typed(2, size, false),
+            FakePane::typed(3, size, false),
+        ];
+        let tab = Tab::new(&size);
+        tab.assign_pane(&(panes[0].clone() as Arc<dyn Pane>));
+        for (index, pane) in [(0, &panes[2]), (0, &panes[1])] {
+            let request = SplitRequest {
+                direction: SplitDirection::Horizontal,
+                target_is_second: true,
+                size: SplitSize::Cells(62),
+                ..Default::default()
+            };
+            tab.split_and_insert(index, request, pane.clone() as Arc<dyn Pane>)
+                .unwrap();
+        }
+        let widths = || panes.iter().map(|p| p.cols()).collect::<Vec<_>>();
+        assert_eq!(widths(), vec![62, 62, 62]);
+        // a window dragged narrower and wider again, one cell per step
+        for cols in (158..188).rev().chain(159..=200) {
+            tab.resize(TerminalSize {
+                cols,
+                pixel_width: cols * 10,
+                ..size
+            });
+            let w = widths();
+            let spread = w.iter().max().unwrap() - w.iter().min().unwrap();
+            assert!(spread <= 1, "{} cols: {:?}", cols, w);
+            assert_eq!(w.iter().sum::<usize>() + 2, cols);
+        }
+    }
+
+    /// bar (5) | p1 | p2 | dock (20) in a 100x30 tab; p1 active. The dock is split off before
+    /// the bar with `dock_first`, so the tree is bar | (grid | dock) instead of (bar | grid) | dock.
+    fn chrome_tab(dock_first: bool) -> (Tab, [Arc<FakePane>; 4]) {
+        let size = TerminalSize {
+            rows: 30,
+            cols: 100,
+            pixel_width: 1000,
+            pixel_height: 600,
+            dpi: 96,
+        };
+        let p1 = FakePane::typed(1, size, false);
+        let p2 = FakePane::typed(2, size, false);
+        let bar = FakePane::typed(3, size, true);
+        let dock = FakePane::typed(4, size, true);
+        let tab = Tab::new(&size);
+        tab.assign_pane(&(p1.clone() as Arc<dyn Pane>));
+        let split = |index, pane: &Arc<FakePane>, request| {
+            tab.split_and_insert(index, request, pane.clone() as Arc<dyn Pane>)
+                .unwrap();
+        };
+        split(
+            0,
+            &p2,
+            SplitRequest {
+                direction: SplitDirection::Horizontal,
+                ..Default::default()
+            },
+        );
+        let bar_split = SplitRequest {
+            direction: SplitDirection::Horizontal,
+            top_level: true,
+            target_is_second: false,
+            size: SplitSize::Cells(5),
+        };
+        let dock_split = SplitRequest {
+            direction: SplitDirection::Horizontal,
+            top_level: true,
+            target_is_second: true,
+            size: SplitSize::Cells(20),
+        };
+        if dock_first {
+            split(0, &dock, dock_split);
+            split(0, &bar, bar_split);
+        } else {
+            split(0, &bar, bar_split);
+            split(0, &dock, dock_split);
+        }
+        tab.inner.lock().active = 1;
+        (tab, [bar, p1, p2, dock])
+    }
+
+    /// (left, width) of every pane, in tree order.
+    fn columns(tab: &Tab) -> Vec<(usize, usize)> {
+        tab.iter_panes_ignoring_zoom()
+            .iter()
+            .map(|p| (p.left, p.width))
+            .collect()
+    }
+
+    #[test]
+    fn widening_the_bar_shrinks_the_grid_not_the_dock() {
+        for dock_first in [false, true] {
+            let (tab, [bar, p1, p2, dock]) = chrome_tab(dock_first);
+            // The Hivegrid sidebar widens the bar before it splits a view off it.
+            tab.adjust_pane_size_of(3, PaneDirection::Right, 30);
+            assert_eq!((bar.cols(), dock.cols()), (35, 20), "dock_first {dock_first}");
+            assert_eq!(p1.cols() + 1 + p2.cols(), 43, "dock_first {dock_first}");
+            let cols = columns(&tab);
+            assert_eq!(cols[3], (80, 20), "dock_first {dock_first}");
+            // Far too much: the other side keeps its minimum (1-column panes) and nothing
+            // overflows the tab.
+            tab.adjust_pane_size_of(3, PaneDirection::Right, 500);
+            assert_eq!((p1.cols(), p2.cols()), (1, 1), "dock_first {dock_first}");
+            let cols = columns(&tab);
+            assert_eq!(cols[3].0 + cols[3].1, 100, "dock_first {dock_first}");
+        }
+    }
+
+    #[test]
+    fn fixed_width_pane_resizes_at_its_right_edge() {
+        let size = TerminalSize {
+            rows: 30,
+            cols: 100,
+            pixel_width: 1000,
+            pixel_height: 600,
+            dpi: 96,
+        };
+        let grid = FakePane::typed(1, size, false);
+        let bar = FakePane::typed(2, size, true);
+        let view = FakePane::typed(3, size, true);
+        let tab = Tab::new(&size);
+        tab.assign_pane(&(grid.clone() as Arc<dyn Pane>));
+        // (bar | view) | grid, as the Hivegrid sidebar builds it
+        tab.split_and_insert(
+            0,
+            SplitRequest {
+                direction: SplitDirection::Horizontal,
+                top_level: true,
+                target_is_second: false,
+                size: SplitSize::Cells(26),
+            },
+            bar.clone() as Arc<dyn Pane>,
+        )
+        .unwrap();
+        tab.split_and_insert(
+            0,
+            SplitRequest {
+                direction: SplitDirection::Horizontal,
+                top_level: false,
+                target_is_second: true,
+                size: SplitSize::Cells(20),
+            },
+            view.clone() as Arc<dyn Pane>,
+        )
+        .unwrap();
+        assert_eq!((bar.cols(), view.cols(), grid.cols()), (5, 20, 73));
+        // The view moves its right divider; the bar keeps its width.
+        tab.adjust_pane_size_of(3, PaneDirection::Right, 10);
+        assert_eq!((bar.cols(), view.cols(), grid.cols()), (5, 30, 63));
+        tab.adjust_pane_size_of(3, PaneDirection::Left, 4);
+        assert_eq!((bar.cols(), view.cols(), grid.cols()), (5, 26, 67));
+        // The bar is the first side of the bar | view split: that divider moves.
+        tab.adjust_pane_size_of(2, PaneDirection::Right, 2);
+        assert_eq!((bar.cols(), view.cols(), grid.cols()), (7, 24, 67));
+        // A grid pane: the nearest split, as upstream.
+        tab.adjust_pane_size_of(1, PaneDirection::Left, 3);
+        assert_eq!((bar.cols(), view.cols(), grid.cols()), (7, 21, 70));
+    }
+
+    #[test]
+    fn top_level_split_sizes_the_new_pane() {
+        let (tab, [bar, p1, p2, dock]) = chrome_tab(false);
+        // The bar and dock were created full width; the split gives them their slot.
+        assert_eq!((bar.cols(), dock.cols()), (5, 20));
+        assert_eq!(p1.cols() + 1 + p2.cols(), 73);
+        let ids: Vec<_> = tab.iter_panes().iter().map(|p| p.pane.pane_id()).collect();
+        assert_eq!(ids, vec![3, 1, 2, 4]);
+    }
+
+    #[test]
+    fn zoom_keeps_chrome() {
+        let (tab, [bar, p1, p2, dock]) = chrome_tab(false);
+        let (p1_cols, p2_cols) = (p1.cols(), p2.cols());
+        tab.toggle_zoom();
+
+        // The zoomed pane fills the area between bar and dock, which stay in place.
+        let panes = tab.iter_panes();
+        let geometry: Vec<_> = panes
+            .iter()
+            .map(|p| (p.pane.pane_id(), p.index, p.left, p.width, p.is_zoomed))
+            .collect();
+        assert_eq!(
+            geometry,
+            vec![
+                (3, 0, 0, 5, false),
+                (1, 1, 6, 73, true),
+                (4, 3, 80, 20, false)
+            ]
+        );
+        assert_eq!(panes[1].pixel_width, 730);
+        assert_eq!(p1.cols(), 73);
+        assert!(panes[1].is_active);
+        // Only the dividers beside chrome are visible.
+        let splits: Vec<_> = tab.iter_splits().iter().map(|s| s.left).collect();
+        assert_eq!(splits, vec![79, 5]);
+
+        // Focus moves: to the bar keeps the zoom, to the hidden p2 is an ordinary move.
+        assert_eq!(
+            tab.inner.lock().chrome_zoom_direction(PaneDirection::Left),
+            Some(Some(0))
+        );
+        assert_eq!(
+            tab.inner.lock().chrome_zoom_direction(PaneDirection::Right),
+            None
+        );
+        tab.inner.lock().active = 3;
+        assert_eq!(tab.get_active_pane().unwrap().pane_id(), 4);
+        assert_eq!(tab.get_zoomed_pane().unwrap().pane_id(), 1);
+        assert_eq!(
+            tab.inner.lock().chrome_zoom_direction(PaneDirection::Left),
+            Some(Some(1))
+        );
+        tab.inner.lock().active = 1;
+
+        // A resize while zoomed: chrome keeps its width, the zoomed pane takes the change.
+        tab.resize(TerminalSize {
+            rows: 30,
+            cols: 120,
+            pixel_width: 1200,
+            pixel_height: 600,
+            dpi: 96,
+        });
+        assert_eq!((bar.cols(), dock.cols(), p1.cols()), (5, 20, 93));
+
+        // Unzoom restores the grid (grown by the resize).
+        tab.toggle_zoom();
+        assert!(tab.get_zoomed_pane().is_none());
+        assert_eq!(p1.cols() + 1 + p2.cols(), 93);
+        assert!(p1.cols() > p1_cols && p2.cols() > p2_cols);
+        assert_eq!(tab.iter_panes().len(), 4);
+        assert_eq!(tab.iter_splits().len(), 3);
+
+        // A split while zoomed (top-level too) unzooms.
+        tab.toggle_zoom();
+        assert!(tab.get_zoomed_pane().is_some());
+        tab.compute_split_size(
+            1,
+            SplitRequest {
+                direction: SplitDirection::Horizontal,
+                top_level: true,
+                ..Default::default()
+            },
+        );
+        assert!(tab.get_zoomed_pane().is_none());
+    }
+
+    #[test]
+    fn zooming_chrome_or_a_tab_without_chrome_fills_the_tab() {
+        let (tab, _) = chrome_tab(true);
+        tab.inner.lock().active = 3; // the dock
+        tab.toggle_zoom();
+        let panes = tab.iter_panes();
+        assert_eq!(panes.len(), 1);
+        assert_eq!((panes[0].pane.pane_id(), panes[0].width), (4, 100));
+        assert!(tab.iter_splits().is_empty());
     }
 
     fn is_send_and_sync<T: Send + Sync>() -> bool {

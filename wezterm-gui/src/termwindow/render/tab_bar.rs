@@ -84,6 +84,7 @@ impl crate::TermWindow {
                 foreground: palette.foreground.to_linear(),
                 pane: None,
                 is_active: true,
+                dim: false,
                 selection_fg: LinearRgba::default(),
                 selection_bg: LinearRgba::default(),
                 cursor_fg: LinearRgba::default(),

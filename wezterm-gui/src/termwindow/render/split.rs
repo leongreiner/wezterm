@@ -20,6 +20,27 @@ impl crate::TermWindow {
         })
     }
 
+    /// True for a vertical divider with a pane on either side whose default background
+    /// differs from the window's (set with OSC 11, as the Hivegrid bar and overview dock do).
+    /// Such a pane paints the window padding above and below it, so its divider has to run
+    /// through the padding as well, or the colour edge would show a notch without a line.
+    fn split_beside_painted_pane(
+        &self,
+        split: &PositionedSplit,
+        window_bg: wezterm_term::color::SrgbaTuple,
+    ) -> bool {
+        let mux = mux::Mux::get();
+        let Some(tab) = mux.get_active_tab_for_window(self.mux_window_id) else {
+            return false;
+        };
+        tab.iter_panes_ignoring_zoom().iter().any(|p| {
+            (p.left + p.width == split.left || p.left == split.left + 1)
+                && p.top < split.top + split.size
+                && split.top < p.top + p.height
+                && p.pane.palette().background != window_bg
+        })
+    }
+
     pub fn paint_split(
         &mut self,
         layers: &mut TripleLayerQuadAllocator,
@@ -44,14 +65,32 @@ impl crate::TermWindow {
         let pos_x = split.left as f32 * cell_width + padding_left + border.left.get() as f32;
 
         if split.direction == SplitDirection::Horizontal {
+            let mut top = pos_y - (cell_height / 2.0);
+            let mut bottom = top + (1. + split.size as f32) * cell_height;
+            let window_bg = self.palette().background;
+            if self.split_beside_painted_pane(split, window_bg) {
+                if split.top == 0 {
+                    top = first_row_offset;
+                }
+                if split.top + split.size >= self.terminal_size.rows as usize {
+                    let bottom_bar = if self.show_tab_bar && self.config.tab_bar_at_bottom {
+                        self.tab_bar_pixel_height()?
+                    } else {
+                        0.
+                    };
+                    bottom = self.dimensions.pixel_height as f32
+                        - border.bottom.get() as f32
+                        - bottom_bar;
+                }
+            }
             self.filled_rectangle(
                 layers,
                 2,
                 euclid::rect(
                     pos_x + (cell_width / 2.0),
-                    pos_y - (cell_height / 2.0),
+                    top,
                     self.render_metrics.underline_height as f32,
-                    (1. + split.size as f32) * cell_height,
+                    bottom - top,
                 ),
                 foreground,
             )?;

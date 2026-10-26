@@ -105,6 +105,11 @@ impl crate::TermWindow {
                 config.text_background_opacity
             });
 
+        // inactive_pane_hsb applies to inactive panes, except chrome that set the user var
+        // `hivegrid_no_dim` (the Hivegrid bar, the overview dock): their colours are the
+        // theme's and never take the keyboard, so dimming them would only grey them out.
+        let dim = !pos.is_active && !pos.pane.copy_user_vars().contains_key("hivegrid_no_dim");
+
         let cell_width = self.render_metrics.cell_size.width as f32;
         let cell_height = self.render_metrics.cell_size.height as f32;
         let background_rect = {
@@ -165,10 +170,10 @@ impl crate::TermWindow {
                         .mul_alpha(config.window_background_opacity),
                 )
                 .context("filled_rectangle")?;
-            quad.set_hsv(if pos.is_active {
-                None
-            } else {
+            quad.set_hsv(if dim {
                 Some(config.inactive_pane_hsb)
+            } else {
+                None
             });
         }
 
@@ -213,10 +218,10 @@ impl crate::TermWindow {
                     .filled_rectangle(layers, 0, background_rect, background)
                     .context("filled_rectangle")?;
 
-                quad.set_hsv(if pos.is_active {
-                    None
-                } else {
+                quad.set_hsv(if dim {
                     Some(config.inactive_pane_hsb)
+                } else {
+                    None
                 });
             }
         }
@@ -333,6 +338,7 @@ impl crate::TermWindow {
                 white_space: TextureRect,
                 filled_box: TextureRect,
                 window_is_transparent: bool,
+                dim: bool,
                 layers: &'a mut TripleLayerQuadAllocator<'b>,
                 error: Option<anyhow::Error>,
             }
@@ -363,6 +369,7 @@ impl crate::TermWindow {
                 white_space,
                 filled_box,
                 window_is_transparent,
+                dim,
                 layers,
                 error: None,
             };
@@ -513,6 +520,7 @@ impl crate::TermWindow {
                                 white_space: self.white_space,
                                 filled_box: self.filled_box,
                                 window_is_transparent: self.window_is_transparent,
+                                dim: self.dim,
                                 default_bg: self.default_bg,
                                 font: None,
                                 style: None,

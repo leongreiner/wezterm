@@ -103,8 +103,13 @@ pub trait Domain: Downcast + Send + Sync {
                 command,
                 command_dir,
             } => {
-                self.spawn_pane(split_size.second, command, command_dir)
-                    .await?
+                // The new pane is the first one of a --left/--top split
+                let size = if split_request.target_is_second {
+                    split_size.second
+                } else {
+                    split_size.first
+                };
+                self.spawn_pane(size, command, command_dir).await?
             }
             SplitSource::MovePane(src_pane_id) => {
                 let (_domain, _window, src_tab) = mux

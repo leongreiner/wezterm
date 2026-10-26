@@ -41,10 +41,10 @@ impl crate::TermWindow {
 
         let num_cols = params.dims.cols;
 
-        let hsv = if params.is_active {
-            None
-        } else {
+        let hsv = if params.dim {
             Some(params.config.inactive_pane_hsb)
+        } else {
+            None
         };
 
         let width_scale = if !params.line.is_single_width() {
@@ -449,6 +449,13 @@ impl crate::TermWindow {
 
         for item in shaped.iter() {
             let cluster = &item.cluster;
+            // A line keeps the cells it had before its pane got narrower (the alternate screen
+            // is not rewrapped and an erase only blanks the visible width), so a program that
+            // drew while its pane was briefly wider, as a new top-level split is, would leave
+            // cells, inline images above all, painted over the neighbouring panes.
+            if cluster.first_cell_idx >= num_cols {
+                continue;
+            }
             let glyph_info = &item.glyph_info;
             let images = cluster.attrs.images().unwrap_or_else(|| vec![]);
             let valign_adjust = match cluster.attrs.vertical_align() {

@@ -114,6 +114,14 @@ pub enum MouseCapture {
     TerminalPane(PaneId),
 }
 
+/// Pixel offsets of the pane area, for `window:get_dimensions()`.
+#[derive(Debug, Clone, Copy)]
+pub struct ContentArea {
+    pub tab_bar_height: usize,
+    pub content_top: usize,
+    pub content_bottom: usize,
+}
+
 /// Type used together with Window::notify to do something in the
 /// context of the window-specific event loop
 pub enum TermWindowNotif {
@@ -125,7 +133,7 @@ pub enum TermWindowNotif {
     },
     SetLeftStatus(String),
     SetRightStatus(String),
-    GetDimensions(Sender<(Dimensions, WindowState)>),
+    GetDimensions(Sender<(Dimensions, WindowState, ContentArea)>),
     GetSelectionForPane {
         pane_id: PaneId,
         tx: Sender<String>,
@@ -1181,7 +1189,8 @@ impl TermWindow {
                 }
             }
             TermWindowNotif::GetDimensions(tx) => {
-                tx.try_send((self.dimensions, self.window_state))
+                let content = self.content_area();
+                tx.try_send((self.dimensions, self.window_state, content))
                     .map_err(chan_err)
                     .context("send GetDimensions response")?;
             }
@@ -3519,6 +3528,32 @@ impl TermWindow {
                 .as_ref()
                 .map(|overlay| overlay.pane.clone())
                 .or_else(|| Some(pane))
+        }
+    }
+
+    /// Where the pane area is in the window, in pixels from the top: below the fancy tab
+    /// bar (when shown at the top), the OS border and `window_padding.top`, down to the end
+    /// of the last text row. For `window:get_dimensions()`.
+    fn content_area(&self) -> ContentArea {
+        let tab_bar_height = if self.show_tab_bar {
+            self.tab_bar_pixel_height().unwrap_or(0.)
+        } else {
+            0.
+        };
+        let top_bar = if self.config.tab_bar_at_bottom {
+            0.
+        } else {
+            tab_bar_height
+        };
+        let (_, padding_top) = self.padding_left_top();
+        let content_top =
+            top_bar + self.get_os_border().top.get() as f32 + padding_top;
+        let rows_height =
+            self.terminal_size.rows as f32 * self.render_metrics.cell_size.height as f32;
+        ContentArea {
+            tab_bar_height: tab_bar_height.round() as usize,
+            content_top: content_top.round() as usize,
+            content_bottom: (content_top + rows_height).round() as usize,
         }
     }
 

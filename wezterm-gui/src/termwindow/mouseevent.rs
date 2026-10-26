@@ -317,7 +317,12 @@ impl super::TermWindow {
 
         if delta != 0 {
             tab.resize_split_by(split.index, delta);
-            if let Some(split) = tab.iter_splits().into_iter().nth(split.index) {
+            // By index: while a pane is zoomed beside chrome only some splits are listed.
+            if let Some(split) = tab
+                .iter_splits()
+                .into_iter()
+                .find(|s| s.index == split.index)
+            {
                 item.item_type = UIItemType::Split(split);
                 context.invalidate();
             }
@@ -784,6 +789,14 @@ impl super::TermWindow {
                 if pane.pane_id() != pos.pane.pane_id() {
                     // We're over a pane that isn't active
                     match &event.kind {
+                        WMEK::Press(_)
+                            if pos.pane.copy_user_vars().contains_key("hivegrid_no_focus") =>
+                        {
+                            // A pane that set the user var `hivegrid_no_focus` (the Hivegrid
+                            // sidebar bar) gets the press but never the keyboard focus: a
+                            // click on its buttons leaves the focus in the grid.
+                            pane = Arc::clone(&pos.pane);
+                        }
                         WMEK::Press(_) => {
                             let mux = Mux::get();
                             mux.get_active_tab_for_window(self.mux_window_id)
@@ -800,10 +813,14 @@ impl super::TermWindow {
 
                                 pane = Arc::clone(&pos.pane);
                                 context.invalidate();
-                            } else if pos.pane.is_mouse_grabbed() {
-                                // A pane that reports the mouse gets the hover (pointer
-                                // shape, motion reports) without having the focus: the
-                                // Hivegrid sidebar bar shows a hand over its buttons.
+                            } else {
+                                // Motion goes to the pane under the pointer, focused or not:
+                                // a pane that reports the mouse gets the hover (pointer
+                                // shape, motion reports; the Hivegrid sidebar bar shows a
+                                // hand over its buttons), and the focused pane is not sent
+                                // motion reports for positions in another pane (upstream
+                                // sent them, with the other pane's coordinates, and the
+                                // focused pane never got a pointer leave report).
                                 pane = Arc::clone(&pos.pane);
                             }
                         }

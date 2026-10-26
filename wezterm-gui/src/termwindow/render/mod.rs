@@ -148,6 +148,8 @@ pub struct RenderScreenLineParams<'a> {
     pub cursor_border_color: LinearRgba,
     pub foreground: LinearRgba,
     pub is_active: bool,
+    /// Apply inactive_pane_hsb: an inactive pane that did not opt out (`hivegrid_no_dim`).
+    pub dim: bool,
 
     pub selection_fg: LinearRgba,
     pub selection_bg: LinearRgba,
