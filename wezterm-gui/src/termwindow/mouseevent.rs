@@ -783,6 +783,11 @@ impl super::TermWindow {
 
                                 pane = Arc::clone(&pos.pane);
                                 context.invalidate();
+                            } else if pos.pane.is_mouse_grabbed() {
+                                // A pane that reports the mouse gets the hover (pointer
+                                // shape, motion reports) without having the focus: the
+                                // Hivegrid sidebar bar shows a hand over its buttons.
+                                pane = Arc::clone(&pos.pane);
                             }
                         }
                         WMEK::Release(_) | WMEK::HorzWheel(_) => {}
