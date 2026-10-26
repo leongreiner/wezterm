@@ -56,6 +56,15 @@ Possible values for the `FormatItem` elements are:
 * `{Background={AnsiColor="Black"}}` - set the background color to an ansi color as per `Foreground` above.
 * `{Background={Color="blue"}}` - set the background color to a named color or rgb value as per `Foreground` above.
 * `"ResetAttributes"` - reset all attributes to default. {{since('20220807-113146-c2fee766', inline=True)}}
+* `{Click="id"}` - start a clickable region named `id`. This only has an
+  effect in the status text set with
+  [window:set_right_status](../window/set_right_status.md) and
+  [window:set_left_status](../window/set_left_status.md); see
+  [status-click](../window-events/status-click.md). The region lasts until
+  `"ClickEnd"` or `"ResetAttributes"`. (Hivegrid fork only; stock WezTerm
+  rejects the item as an unknown `FormatItem`.)
+* `"ClickEnd"` - end the region started by `Click`, leaving colors and other
+  attributes unchanged. (Hivegrid fork only.)
 
 This example shows how to use arbitrary escape sequences to change the underline color:
 

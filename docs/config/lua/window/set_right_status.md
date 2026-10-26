@@ -139,3 +139,7 @@ wezterm.on('update-right-status', function(window, pane)
   window:set_right_status(wezterm.format(elements))
 end)
 ```
+
+In the Hivegrid fork, parts of the status can be made clickable with the
+`Click` item of [wezterm.format](../wezterm/format.md); clicks are reported by
+the [status-click](../window-events/status-click.md) event.
