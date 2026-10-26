@@ -10,7 +10,9 @@ on top of upstream; `origin` is the private fork, `upstream` is wezterm/wezterm.
   button)` instead of dragging the window. See
   `docs/config/lua/window-events/status-click.md`. Implemented through an OSC 8
   hyperlink with the `wezterm-status-click:` scheme, so the id travels through
-  the unchanged `set_right_status` string path; stock WezTerm ignores it.
+  the unchanged `set_right_status` string path; stock WezTerm ignores it. Holding the
+  left button on such a region (brand mark included) and moving more than 4 px drags the
+  window instead of clicking, so the header can be grabbed anywhere.
 - `ShowOverlayCommand` key assignment (argument: a `SpawnCommand`): runs a program in a
   pty-backed overlay that covers the active tab until the program exits, then restores the
   tab; its panes keep running underneath. Only the full-tab overlay exists, there is no

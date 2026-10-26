@@ -23,6 +23,10 @@ use wezterm_dynamic::ToDynamic;
 use wezterm_term::input::{MouseButton, MouseEventKind as TMEK};
 use wezterm_term::{ClickPosition, LastMouseClick, StableRowIndex};
 
+/// Pixels the mouse must travel with the left button held on a clickable status
+/// segment before the press counts as a window drag instead of a click.
+const STATUS_CLICK_DRAG_THRESHOLD: isize = 4;
+
 impl super::TermWindow {
     fn resolve_ui_item(&self, event: &MouseEvent) -> Option<UIItem> {
         let x = event.coords.x;
@@ -160,6 +164,28 @@ impl super::TermWindow {
             }
 
             WMEK::Move => {
+                let left_held = self.current_mouse_buttons.contains(&MousePress::Left);
+                if let Some((MousePress::Left, _, start)) =
+                    self.status_click_press.as_ref().filter(|_| left_held)
+                {
+                    let dx = event.coords.x - start.coords.x;
+                    let dy = event.coords.y - start.coords.y;
+                    if dx * dx + dy * dy > STATUS_CLICK_DRAG_THRESHOLD.pow(2) {
+                        // The press on a clickable segment (brand mark, status pill)
+                        // turned into a drag: it is no click, it moves the window.
+                        let start = start.clone();
+                        self.status_click_press = None;
+                        let maximized = self
+                            .window_state
+                            .intersects(WindowState::MAXIMIZED | WindowState::FULL_SCREEN);
+                        context.set_window_drag_position(start.screen_coords);
+                        if !maximized {
+                            self.window_drag_position.replace(start);
+                        }
+                        context.request_drag_move();
+                        return;
+                    }
+                }
                 if let Some(start) = self.window_drag_position.as_ref() {
                     // Dragging the window
                     // Compute the distance since the initial event
@@ -393,11 +419,13 @@ impl super::TermWindow {
     fn mouse_event_status_click(&mut self, id: String, event: MouseEvent, context: &dyn WindowOps) {
         match event.kind {
             WMEK::Press(press) => {
-                self.status_click_press.replace((press, id));
+                self.status_click_press.replace((press, id, event.clone()));
             }
             WMEK::Release(press) => {
-                if self.status_click_press.take() == Some((press, id.clone())) {
-                    self.emit_status_click(id, press);
+                if let Some((p, sid, _)) = self.status_click_press.take() {
+                    if p == press && sid == id {
+                        self.emit_status_click(id, press);
+                    }
                 }
             }
             _ => {}

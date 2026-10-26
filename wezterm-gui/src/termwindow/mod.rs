@@ -400,9 +400,10 @@ pub struct TermWindow {
     pub right_status: String,
     pub left_status: String,
     last_ui_item: Option<UIItem>,
-    /// Mouse button and id of a press that landed on a clickable status
-    /// segment; the matching release over the same segment emits `status-click`.
-    status_click_press: Option<(MousePress, String)>,
+    /// Mouse button, id and event of a press that landed on a clickable status
+    /// segment; the matching release over the same segment emits `status-click`,
+    /// a left press that travels far enough drags the window instead.
+    status_click_press: Option<(MousePress, String, MouseEvent)>,
     /// Tracks whether the current mouse-down event is part of click-focus.
     /// If so, we ignore mouse events until released
     is_click_to_focus_window: bool,
