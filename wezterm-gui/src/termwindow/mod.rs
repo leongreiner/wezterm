@@ -160,6 +160,8 @@ pub enum UIItemType {
     ScrollThumb,
     BelowScrollThumb,
     Split(PositionedSplit),
+    /// A `Click` region of the tab bar status, carrying its id.
+    StatusClick(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -398,6 +400,9 @@ pub struct TermWindow {
     pub right_status: String,
     pub left_status: String,
     last_ui_item: Option<UIItem>,
+    /// Mouse button and id of a press that landed on a clickable status
+    /// segment; the matching release over the same segment emits `status-click`.
+    status_click_press: Option<(MousePress, String)>,
     /// Tracks whether the current mouse-down event is part of click-focus.
     /// If so, we ignore mouse events until released
     is_click_to_focus_window: bool,
@@ -789,6 +794,7 @@ impl TermWindow {
             ui_items: vec![],
             dragging: None,
             last_ui_item: None,
+            status_click_press: None,
             is_click_to_focus_window: false,
             key_table_state: KeyTableState::default(),
             modal: RefCell::new(None),

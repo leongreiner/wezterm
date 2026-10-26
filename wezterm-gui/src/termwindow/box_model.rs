@@ -4,6 +4,7 @@ use crate::color::LinearRgba;
 use crate::customglyph::{BlockKey, Poly};
 use crate::glyphcache::CachedGlyph;
 use crate::quad::{QuadImpl, QuadTrait, TripleLayerQuadAllocator, TripleLayerQuadAllocatorTrait};
+use crate::tabbar::status_click_id;
 use crate::termwindow::{
     ColorEase, MouseCapture, RenderState, TermWindowNotif, UIItem, UIItemType,
 };
@@ -267,18 +268,42 @@ impl Element {
     }
 
     pub fn with_line(font: &Rc<LoadedFont>, line: &Line, palette: &ColorPalette) -> Self {
+        Self::with_line_impl(font, line, palette, false)
+    }
+
+    /// Like `with_line`, but cells carrying a `Click` id become hit targets
+    /// of their own, reported as `UIItemType::StatusClick`.
+    pub fn with_status_line(font: &Rc<LoadedFont>, line: &Line, palette: &ColorPalette) -> Self {
+        Self::with_line_impl(font, line, palette, true)
+    }
+
+    fn with_line_impl(
+        font: &Rc<LoadedFont>,
+        line: &Line,
+        palette: &ColorPalette,
+        clickable: bool,
+    ) -> Self {
         let mut content: Vec<Element> = vec![];
         let mut prior_attr = None;
 
         for cluster in line.cluster(None) {
+            let click_id = if clickable {
+                status_click_id(&cluster.attrs).map(str::to_string)
+            } else {
+                None
+            };
+
             // Clustering may introduce cluster boundaries when the text hasn't actually
             // changed style. Undo that here.
             // There's still an issue where the style does actually change and we
             // subsequently don't clip the element.
             // <https://github.com/wezterm/wezterm/issues/2560>
             if let Some(prior) = content.last_mut() {
-                let (fg, bg) = prior_attr.as_ref().unwrap();
-                if cluster.attrs.background() == *bg && cluster.attrs.foreground() == *fg {
+                let (fg, bg, prior_click_id) = prior_attr.as_ref().unwrap();
+                if cluster.attrs.background() == *bg
+                    && cluster.attrs.foreground() == *fg
+                    && click_id == *prior_click_id
+                {
                     if let ElementContent::Text(t) = &mut prior.content {
                         t.push_str(&cluster.text);
                         continue;
@@ -286,7 +311,7 @@ impl Element {
                 }
             }
 
-            let child =
+            let mut child =
                 Element::new(font, ElementContent::Text(cluster.text)).colors(ElementColors {
                     border: BorderColor::default(),
                     bg: if cluster.attrs.background() == ColorAttribute::Default {
@@ -306,9 +331,16 @@ impl Element {
                             .into()
                     },
                 });
+            if let Some(id) = &click_id {
+                child = child.item_type(UIItemType::StatusClick(id.clone()));
+            }
 
             content.push(child);
-            prior_attr.replace((cluster.attrs.foreground(), cluster.attrs.background()));
+            prior_attr.replace((
+                cluster.attrs.foreground(),
+                cluster.attrs.background(),
+                click_id,
+            ));
         }
 
         Self::new(font, ElementContent::Children(content))

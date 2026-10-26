@@ -3,9 +3,11 @@ use config::lua::mlua::{self, IntoLua, Lua};
 use finl_unicode::grapheme_clusters::Graphemes;
 use luahelper::impl_lua_conversion_dynamic;
 use std::str::FromStr;
+use std::sync::Arc;
 use termwiz::caps::{Capabilities, ColorLevel, ProbeHints};
 use termwiz::cell::{grapheme_column_width, unicode_column_width, AttributeChange, CellAttributes};
 use termwiz::color::{AnsiColor, ColorAttribute, ColorSpec, SrgbaTuple};
+use termwiz::hyperlink::Hyperlink;
 use termwiz::render::terminfo::TerminfoRenderer;
 use termwiz::surface::change::Change;
 use termwiz::surface::Line;
@@ -93,12 +95,22 @@ impl From<FormatColor> for ColorSpec {
     }
 }
 
+/// URI scheme the `Click` format item stores its id under, as an OSC 8
+/// hyperlink. The tab bar recognises it and treats the cells as a click target;
+/// other terminals and older WezTerm versions ignore the sequence.
+pub const STATUS_CLICK_URI_PREFIX: &str = "wezterm-status-click:";
+
 #[derive(Debug, FromDynamic, ToDynamic, Clone, PartialEq, Eq)]
 pub enum FormatItem {
     Foreground(FormatColor),
     Background(FormatColor),
     Attribute(AttributeChange),
     ResetAttributes,
+    /// Starts a clickable region carrying this id; the tab bar resolves
+    /// clicks on its status text back to the id.
+    Click(String),
+    /// Ends the clickable region started by `Click`.
+    ClickEnd,
     Text(String),
 }
 impl_lua_conversion_dynamic!(FormatItem);
@@ -111,6 +123,14 @@ impl From<FormatItem> for Change {
             FormatItem::Foreground(c) => AttributeChange::Foreground(c.to_attr()).into(),
             FormatItem::Background(c) => AttributeChange::Background(c.to_attr()).into(),
             FormatItem::ResetAttributes => Change::AllAttributes(CellAttributes::default()),
+            FormatItem::Click(id) => {
+                AttributeChange::Hyperlink(Some(Arc::new(Hyperlink::new(format!(
+                    "{STATUS_CLICK_URI_PREFIX}{}",
+                    id.replace(char::is_control, "")
+                )))))
+                .into()
+            }
+            FormatItem::ClickEnd => AttributeChange::Hyperlink(None).into(),
         }
     }
 }

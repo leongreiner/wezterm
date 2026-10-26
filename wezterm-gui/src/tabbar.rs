@@ -2,15 +2,16 @@ use crate::termwindow::{PaneInformation, TabInformation, UIItem, UIItemType};
 use config::{ConfigHandle, TabBarColors};
 use finl_unicode::grapheme_clusters::Graphemes;
 use mlua::FromLua;
+use std::sync::Arc;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 use termwiz::cell::{unicode_column_width, Cell, CellAttributes};
 use termwiz::color::{AnsiColor, ColorSpec};
 use termwiz::escape::csi::Sgr;
 use termwiz::escape::parser::Parser;
-use termwiz::escape::{Action, ControlCode, CSI};
+use termwiz::escape::{Action, ControlCode, OperatingSystemCommand, CSI};
 use termwiz::surface::SEQ_ZERO;
-use termwiz_funcs::{format_as_escapes, FormatColor, FormatItem};
+use termwiz_funcs::{format_as_escapes, FormatColor, FormatItem, STATUS_CLICK_URI_PREFIX};
 use wezterm_term::{Line, Progress};
 use window::{IntegratedTitleButton, IntegratedTitleButtonAlignment, IntegratedTitleButtonStyle};
 
@@ -22,6 +23,47 @@ pub struct TabBarState {
     /// at which the tab bar should be rebuilt to advance to the next frame;
     /// None when no spinner is visible.
     next_progress_frame_due: Option<Instant>,
+    /// Clickable regions of the left and right status, in cell columns.
+    click_segments: Vec<ClickSegment>,
+}
+
+/// A run of status cells carrying one `Click` id.
+#[derive(Clone, Debug, PartialEq)]
+struct ClickSegment {
+    id: String,
+    x: usize,
+    width: usize,
+}
+
+/// The `Click` id stored in `attrs`, if the cell is part of a clickable region.
+pub fn status_click_id(attrs: &CellAttributes) -> Option<&str> {
+    attrs
+        .hyperlink()?
+        .uri()
+        .strip_prefix(STATUS_CLICK_URI_PREFIX)
+}
+
+/// Appends one segment per run of cells in `line` that share a click id.
+/// `origin` is the column of the line's first cell in the tab bar.
+fn collect_click_segments(line: &Line, origin: usize, out: &mut Vec<ClickSegment>) {
+    let mut open: Option<ClickSegment> = None;
+    for cell in line.visible_cells() {
+        let x = origin + cell.cell_index();
+        match (status_click_id(cell.attrs()), open.as_mut()) {
+            (Some(id), Some(seg)) if seg.id == id && seg.x + seg.width == x => {
+                seg.width += cell.width();
+            }
+            (id, _) => {
+                out.extend(open.take());
+                open = id.map(|id| ClickSegment {
+                    id: id.to_string(),
+                    x,
+                    width: cell.width(),
+                });
+            }
+        }
+    }
+    out.extend(open);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -314,6 +356,7 @@ impl TabBarState {
                 width: 1,
             }],
             next_progress_frame_due: None,
+            click_segments: vec![],
         }
     }
 
@@ -531,6 +574,7 @@ impl TabBarState {
             Self::integrated_title_buttons(mouse_x, &mut x, config, &mut items, &mut line, &colors);
         }
 
+        let mut click_segments = vec![];
         let left_status_line = parse_status_text(left_status, black_cell.attrs().clone());
         if left_status_line.len() > 0 {
             items.push(TabEntry {
@@ -539,6 +583,7 @@ impl TabBarState {
                 x,
                 width: left_status_line.len(),
             });
+            collect_click_segments(&left_status_line, x, &mut click_segments);
             x += left_status_line.len();
             line.append_line(left_status_line, SEQ_ZERO);
         }
@@ -683,6 +728,11 @@ impl TabBarState {
             right_status_line.remove_cell(0, SEQ_ZERO);
         }
 
+        collect_click_segments(
+            &right_status_line,
+            title_width.saturating_sub(right_status_line.len()),
+            &mut click_segments,
+        );
         line.append_line(right_status_line, SEQ_ZERO);
         while line.len() < title_width {
             line.insert_cell(x, black_cell.clone(), title_width, SEQ_ZERO);
@@ -700,6 +750,7 @@ impl TabBarState {
             line,
             items,
             next_progress_frame_due: has_indeterminate_progress.then(next_spinner_frame_due),
+            click_segments,
         }
     }
 
@@ -713,6 +764,17 @@ impl TabBarState {
                 y,
                 height: cell_height,
                 item_type: UIItemType::TabBar(entry.item),
+            });
+        }
+
+        // After the status entries they overlap: hit testing takes the last match.
+        for seg in self.click_segments.iter() {
+            items.push(UIItem {
+                x: seg.x * cell_width,
+                width: seg.width * cell_width,
+                y,
+                height: cell_height,
+                item_type: UIItemType::StatusClick(seg.id.clone()),
             });
         }
 
@@ -761,7 +823,12 @@ pub fn parse_status_text(text: &str, default_cell: CellAttributes) -> Line {
                 flush_print(&mut print_buffer, &mut cells, &pen);
                 match csi {
                     CSI::Sgr(sgr) => match sgr {
-                        Sgr::Reset => pen = default_cell.clone(),
+                        Sgr::Reset => {
+                            // Like a terminal, SGR 0 leaves the hyperlink alone.
+                            let link = pen.hyperlink().cloned();
+                            pen = default_cell.clone();
+                            pen.set_hyperlink(link);
+                        }
                         Sgr::Intensity(i) => {
                             pen.set_intensity(i);
                         }
@@ -811,8 +878,13 @@ pub fn parse_status_text(text: &str, default_cell: CellAttributes) -> Line {
                     _ => {}
                 }
             }
-            Action::OperatingSystemCommand(_)
-            | Action::DeviceControl(_)
+            Action::OperatingSystemCommand(osc) => {
+                flush_print(&mut print_buffer, &mut cells, &pen);
+                if let OperatingSystemCommand::SetHyperlink(link) = *osc {
+                    pen.set_hyperlink(link.map(Arc::new));
+                }
+            }
+            Action::DeviceControl(_)
             | Action::Esc(_)
             | Action::KittyImage(_)
             | Action::XtGetTcap(_)

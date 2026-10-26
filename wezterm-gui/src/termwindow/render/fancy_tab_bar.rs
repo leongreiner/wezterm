@@ -95,7 +95,12 @@ impl crate::TermWindow {
         };
 
         let item_to_elem = |item: &TabEntry| -> Element {
-            let element = Element::with_line(&font, &item.title, palette);
+            let element = match item.item {
+                TabBarItem::LeftStatus | TabBarItem::RightStatus => {
+                    Element::with_status_line(&font, &item.title, palette)
+                }
+                _ => Element::with_line(&font, &item.title, palette),
+            };
 
             let bg_color = item
                 .title

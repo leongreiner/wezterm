@@ -40,6 +40,7 @@ impl super::TermWindow {
                 self.update_title_post_status();
             }
             UIItemType::CloseTab(_)
+            | UIItemType::StatusClick(_)
             | UIItemType::AboveScrollThumb
             | UIItemType::BelowScrollThumb
             | UIItemType::ScrollThumb
@@ -51,6 +52,7 @@ impl super::TermWindow {
         match item.item_type {
             UIItemType::TabBar(_) => {}
             UIItemType::CloseTab(_)
+            | UIItemType::StatusClick(_)
             | UIItemType::AboveScrollThumb
             | UIItemType::BelowScrollThumb
             | UIItemType::ScrollThumb
@@ -382,7 +384,57 @@ impl super::TermWindow {
             UIItemType::CloseTab(idx) => {
                 self.mouse_event_close_tab(idx, event, context);
             }
+            UIItemType::StatusClick(id) => {
+                self.mouse_event_status_click(id, event, context);
+            }
         }
+    }
+
+    fn mouse_event_status_click(&mut self, id: String, event: MouseEvent, context: &dyn WindowOps) {
+        match event.kind {
+            WMEK::Press(press) => {
+                self.status_click_press.replace((press, id));
+            }
+            WMEK::Release(press) => {
+                if self.status_click_press.take() == Some((press, id.clone())) {
+                    self.emit_status_click(id, press);
+                }
+            }
+            _ => {}
+        }
+        context.set_cursor(Some(CursorIcon::Pointer));
+    }
+
+    fn emit_status_click(&mut self, id: String, button: MousePress) {
+        let pane = match self.get_active_pane_or_overlay() {
+            Some(pane) => pane,
+            None => return,
+        };
+
+        async fn dispatch_status_click(
+            lua: Option<Rc<mlua::Lua>>,
+            window: GuiWin,
+            pane: MuxPane,
+            id: String,
+            button: MousePress,
+        ) -> anyhow::Result<()> {
+            if let Some(lua) = lua {
+                let args = lua.pack_multi((window, pane, id, format!("{button:?}")))?;
+                config::lua::emit_event(&lua, ("status-click".to_string(), args))
+                    .await
+                    .map_err(|e| {
+                        log::error!("while processing status-click event: {:#}", e);
+                        e
+                    })?;
+            }
+            Ok(())
+        }
+        let window = GuiWin::new(self);
+        let pane = MuxPane(pane.pane_id());
+        promise::spawn::spawn(config::with_lua_config_on_main_thread(move |lua| {
+            dispatch_status_click(lua, window, pane, id, button)
+        }))
+        .detach();
     }
 
     pub fn mouse_event_close_tab(
