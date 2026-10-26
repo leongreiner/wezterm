@@ -42,7 +42,12 @@ if [ -d "$LIBDIR" ]; then
   LD_LIBRARY_PATH=$LIBDIR ldd "$OPT/wezterm-gui" "$OPT/wezterm" |
     awk -v root="$SYSROOT/" 'index($3, root) == 1 { print $3 }' | sort -u |
     while read -r lib; do
-      cp -fL "$lib" "$OPT/lib/$(basename "$lib")"
+      # Same rename as the binaries: copying over a library a running wezterm has mapped
+      # truncates it under that process, which then dies (SIGBUS).
+      dest=$OPT/lib/$(basename "$lib")
+      cmp -s "$lib" "$dest" && continue
+      cp -fL "$lib" "$dest.new"
+      mv -f "$dest.new" "$dest"
     done
 fi
 
