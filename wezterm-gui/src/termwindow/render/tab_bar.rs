@@ -113,7 +113,11 @@ impl crate::TermWindow {
     ) -> anyhow::Result<f32> {
         if config.use_fancy_tab_bar {
             let font = fontconfig.title_font()?;
-            Ok((font.metrics().cell_height.get() as f32 * 1.75).ceil())
+            Ok(
+                (font.metrics().cell_height.get() * config.tab_bar_height_scale as f64).ceil()
+                    as f32
+                    + config.tab_bar_separator_height as f32,
+            )
         } else {
             Ok(render_metrics.cell_size.height as f32)
         }

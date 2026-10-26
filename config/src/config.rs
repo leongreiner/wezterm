@@ -514,6 +514,27 @@ pub struct Config {
     #[dynamic(default = "default_tab_max_width")]
     pub tab_max_width: usize,
 
+    /// Height of the fancy tab bar as a multiple of the cell height of
+    /// `window_frame.font`.
+    #[dynamic(default = "default_tab_bar_scale")]
+    pub tab_bar_height_scale: f64,
+
+    /// Height of the boxes the fancy tab bar draws for the left and right
+    /// status, in the same unit as `tab_bar_height_scale`. They are centred
+    /// vertically in the bar, so a value below `tab_bar_height_scale` leaves
+    /// room above and below them.
+    #[dynamic(default = "default_tab_bar_scale")]
+    pub tab_bar_status_scale: f64,
+
+    /// Thickness in pixels of a line along the edge of the fancy tab bar
+    /// that faces the terminal area. It is part of the bar's height.
+    #[dynamic(default)]
+    pub tab_bar_separator_height: usize,
+
+    /// Colour of that line; defaults to `colors.tab_bar.inactive_tab_edge`.
+    #[dynamic(default)]
+    pub tab_bar_separator_color: Option<RgbaColor>,
+
     /// If true, hide the tab bar if the window only has a single tab.
     #[dynamic(default)]
     pub hide_tab_bar_if_only_one_tab: bool,
@@ -1885,6 +1906,10 @@ fn default_enq_answerback() -> String {
 
 fn default_tab_max_width() -> usize {
     16
+}
+
+fn default_tab_bar_scale() -> f64 {
+    1.75
 }
 
 fn default_update_interval() -> u64 {

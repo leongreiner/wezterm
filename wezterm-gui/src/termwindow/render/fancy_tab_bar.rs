@@ -57,6 +57,7 @@ impl crate::TermWindow {
 
     pub fn build_fancy_tab_bar(&self, palette: &ColorPalette) -> anyhow::Result<ComputedElement> {
         let tab_bar_height = self.tab_bar_pixel_height()?;
+        let separator_height = self.config.tab_bar_separator_height as f32;
         let font = self.fonts.title_font()?;
         let metrics = RenderMetrics::with_font_metrics(&font.metrics());
         let items = self.tab_bar.items();
@@ -125,7 +126,7 @@ impl crate::TermWindow {
             match item.item {
                 TabBarItem::RightStatus | TabBarItem::LeftStatus | TabBarItem::None => element
                     .item_type(UIItemType::TabBar(TabBarItem::None))
-                    .line_height(Some(1.75))
+                    .line_height(Some(self.config.tab_bar_status_scale))
                     .margin(BoxDimension {
                         left: Dimension::Cells(0.),
                         right: Dimension::Cells(0.),
@@ -433,6 +434,7 @@ impl crate::TermWindow {
         if !left_status.is_empty() {
             children.push(
                 Element::new(&font, ElementContent::Children(left_status))
+                    .vertical_align(VerticalAlign::Middle)
                     .colors(bar_colors.clone()),
             );
         }
@@ -475,6 +477,7 @@ impl crate::TermWindow {
         );
         children.push(
             Element::new(&font, ElementContent::Children(right_eles))
+                .vertical_align(VerticalAlign::Middle)
                 .colors(bar_colors.clone())
                 .float(Float::Right),
         );
@@ -485,9 +488,31 @@ impl crate::TermWindow {
             .display(DisplayType::Block)
             .item_type(UIItemType::TabBar(TabBarItem::None))
             .min_width(Some(Dimension::Pixels(self.dimensions.pixel_width as f32)))
-            .min_height(Some(Dimension::Pixels(tab_bar_height)))
+            .min_height(Some(Dimension::Pixels(tab_bar_height - separator_height)))
             .vertical_align(tab_vertical_alignment)
-            .colors(bar_colors);
+            .border(BoxDimension {
+                left: Dimension::Pixels(0.),
+                right: Dimension::Pixels(0.),
+                top: Dimension::Pixels(if self.config.tab_bar_at_bottom {
+                    separator_height
+                } else {
+                    0.
+                }),
+                bottom: Dimension::Pixels(if self.config.tab_bar_at_bottom {
+                    0.
+                } else {
+                    separator_height
+                }),
+            })
+            .colors(ElementColors {
+                border: BorderColor::new(
+                    self.config
+                        .tab_bar_separator_color
+                        .unwrap_or_else(|| colors.inactive_tab_edge())
+                        .to_linear(),
+                ),
+                ..bar_colors
+            });
 
         let border = self.get_os_border();
 
