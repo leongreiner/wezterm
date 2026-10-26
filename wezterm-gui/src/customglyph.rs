@@ -132,6 +132,9 @@ pub enum BlockCoord {
     /// A fraction of the width/height.  The first value is the
     /// numerator, the second is the denominator.
     Frac(i8, i8),
+    /// Thousandths of the width/height, for shapes that need finer positions
+    /// than `Frac`'s `i8` fractions give.
+    Permille(i16),
 
     /// Like Frac() above, but also specifies a scale to use
     /// together with the underline height to adjust the position.
@@ -168,6 +171,7 @@ impl BlockCoord {
             Self::Zero => 0.,
             Self::One => max as f32,
             Self::Frac(num, den) => hint(max as f32 * num as f32 / den as f32),
+            Self::Permille(p) => hint(max as f32 * p as f32 / 1000.),
             Self::FracWithOffset(num, den, under) => {
                 hint((max as f32 * num as f32 / den as f32) + (underline_height * under.to_scale()))
             }
@@ -644,6 +648,8 @@ pub enum PolyStyle {
     Fill,
     OutlineAlpha,
     OutlineThin,
+    // A 0.8 px line, for rims that must not outweigh a small shape
+    OutlineFine,
     // A line with the thickness as underlines
     Outline,
     // A line with twice the thickness of underlines
@@ -658,6 +664,7 @@ impl PolyStyle {
             }
 
             PolyStyle::OutlineThin
+            | PolyStyle::OutlineFine
             | PolyStyle::Outline
             | PolyStyle::OutlineHeavy
             | PolyStyle::OutlineAlpha => {
@@ -667,6 +674,8 @@ impl PolyStyle {
                     stroke.width *= 3.01; // NOTE: Changing this makes block cursor disproportionate at different font sizes and resolutions
                 } else if self == PolyStyle::OutlineThin {
                     stroke.width = 1.2;
+                } else if self == PolyStyle::OutlineFine {
+                    stroke.width = 0.8;
                 } else if self == PolyStyle::OutlineAlpha {
                     stroke.width = 0.25; // NOTE: This is for filling antialiased border between triangles when using the alpha style
                 }

@@ -426,7 +426,24 @@ impl Element {
 pub enum ElementContent {
     Text(String),
     Children(Vec<Element>),
-    Poly { line_width: isize, poly: SizedPoly },
+    Poly {
+        line_width: isize,
+        poly: SizedPoly,
+    },
+    /// Several polys, each in its own colour, stacked in one box in the
+    /// order given (the first is drawn first, so the last ends on top).
+    Mark {
+        width: Dimension,
+        height: Dimension,
+        layers: Vec<MarkLayer>,
+    },
+}
+
+/// One coloured layer of an `ElementContent::Mark`.
+#[derive(Debug, Clone)]
+pub struct MarkLayer {
+    pub poly: &'static [Poly],
+    pub color: LinearRgba,
 }
 
 pub struct LayoutContext<'a> {
@@ -473,7 +490,7 @@ impl ComputedElement {
                 }
             }
             ComputedElementContent::Text(_) => {}
-            ComputedElementContent::Poly { .. } => {}
+            ComputedElementContent::Poly { .. } | ComputedElementContent::Mark { .. } => {}
         }
     }
 
@@ -501,7 +518,7 @@ impl ComputedElement {
                     kid.ui_item_impl(items);
                 }
             }
-            ComputedElementContent::Poly { .. } => {}
+            ComputedElementContent::Poly { .. } | ComputedElementContent::Mark { .. } => {}
         }
     }
 }
@@ -513,6 +530,11 @@ pub enum ComputedElementContent {
     Poly {
         line_width: isize,
         poly: PixelSizedPoly,
+    },
+    Mark {
+        width: f32,
+        height: f32,
+        layers: Vec<MarkLayer>,
     },
 }
 
@@ -830,6 +852,35 @@ impl super::TermWindow {
                     content: ComputedElementContent::Children(computed_kids),
                 })
             }
+            ElementContent::Mark {
+                width,
+                height,
+                layers,
+            } => {
+                let width = width.evaluate_as_pixels(context.width);
+                let height = height.evaluate_as_pixels(context.height);
+                let content_rect = euclid::rect(0., 0., width, height.max(min_height));
+                let rects = element.compute_rects(context, content_rect);
+
+                Ok(ComputedElement {
+                    item_type: element.item_type.clone(),
+                    zindex: element.zindex + context.zindex,
+                    baseline,
+                    border,
+                    border_corners,
+                    colors: element.colors.clone(),
+                    hover_colors: element.hover_colors.clone(),
+                    bounds: rects.bounds,
+                    border_rect: rects.border_rect,
+                    padding: rects.padding,
+                    content_rect: rects.content_rect,
+                    content: ComputedElementContent::Mark {
+                        width,
+                        height,
+                        layers: layers.clone(),
+                    },
+                })
+            }
             ElementContent::Poly { poly, line_width } => {
                 let poly = poly.to_pixels(context);
                 let content_rect = euclid::rect(0., 0., poly.width, poly.height.max(min_height));
@@ -957,6 +1008,25 @@ impl super::TermWindow {
 
                 for kid in kids {
                     self.render_element(kid, gl_state, Some(colors))?;
+                }
+            }
+            ComputedElementContent::Mark {
+                width,
+                height,
+                layers: mark_layers,
+            } => {
+                if element.content_rect.width() >= *width {
+                    for layer in mark_layers {
+                        self.poly_quad(
+                            &mut layers,
+                            1,
+                            element.content_rect.origin,
+                            layer.poly,
+                            2,
+                            euclid::size2(*width, *height),
+                            layer.color,
+                        )?;
+                    }
                 }
             }
             ComputedElementContent::Poly { poly, line_width } => {

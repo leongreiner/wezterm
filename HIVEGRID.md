@@ -20,6 +20,10 @@ on top of upstream; `origin` is the private fork, `upstream` is wezterm/wezterm.
 - Fancy tab bar proportions: `tab_bar_height_scale`, `tab_bar_status_scale`,
   `tab_bar_separator_height` and `tab_bar_separator_color` (see
   `docs/config/lua/config/`). Stock WezTerm rejects them, so set them with `pcall`.
+- `tab_bar_brand`: a drawn honeycomb mark (seven coloured hexagons) at the left end of the
+  fancy tab bar, clickable as the status-click id `brand`; the polys are static shapes in
+  `termwindow/render/brand_mark_shapes.rs`, rendered through `ElementContent::Mark`.
+  Stock WezTerm rejects the option: set it with `pcall`.
 
 ## Build without sudo
 

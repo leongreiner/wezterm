@@ -1,7 +1,7 @@
 use crate::background::{BackgroundLayer, Gradient};
 use crate::bell::{AudibleBell, EasingFunction, VisualBell};
 use crate::color::{
-    ColorSchemeFile, HsbTransform, Palette, SrgbaTuple, TabBarStyle, WindowFrameConfig,
+    ColorSchemeFile, HsbTransform, Palette, SrgbaTuple, TabBarBrand, TabBarStyle, WindowFrameConfig,
 };
 use crate::daemon::DaemonOptions;
 use crate::exec_domain::ExecDomain;
@@ -534,6 +534,10 @@ pub struct Config {
     /// Colour of that line; defaults to `colors.tab_bar.inactive_tab_edge`.
     #[dynamic(default)]
     pub tab_bar_separator_color: Option<RgbaColor>,
+
+    /// A drawn mark at the left end of the fancy tab bar; absent: none.
+    #[dynamic(default)]
+    pub tab_bar_brand: Option<TabBarBrand>,
 
     /// If true, hide the tab bar if the window only has a single tab.
     #[dynamic(default)]

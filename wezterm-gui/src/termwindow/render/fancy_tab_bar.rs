@@ -1,6 +1,7 @@
 use crate::customglyph::*;
 use crate::tabbar::{TabBarItem, TabEntry};
 use crate::termwindow::box_model::*;
+use crate::termwindow::render::brand_mark::brand_mark_element;
 use crate::termwindow::render::corners::*;
 
 use crate::termwindow::render::window_buttons::window_button_element;
@@ -415,7 +416,7 @@ impl crate::TermWindow {
                     elem.max_width = Some(Dimension::Pixels(max_tab_width));
                     elem.content = match elem.content {
                         ElementContent::Text(_) => unreachable!(),
-                        ElementContent::Poly { .. } => unreachable!(),
+                        ElementContent::Poly { .. } | ElementContent::Mark { .. } => unreachable!(),
                         ElementContent::Children(mut kids) => {
                             if self.config.show_close_tab_button_in_tabs {
                                 kids.push(make_x_button(&font, &metrics, &colors, tab_idx, active));
@@ -430,6 +431,15 @@ impl crate::TermWindow {
         }
 
         let mut children = vec![];
+
+        if let Some(brand) = self.config.tab_bar_brand.as_ref().filter(|b| b.enabled) {
+            children.push(brand_mark_element(
+                &font,
+                brand,
+                self.dimensions.dpi as f32 / 96.,
+                0,
+            ));
+        }
 
         if !left_status.is_empty() {
             children.push(

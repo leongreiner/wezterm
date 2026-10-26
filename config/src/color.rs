@@ -571,6 +571,101 @@ fn default_window_close() -> String {
     " X ".to_string()
 }
 
+/// The drawn Hivegrid mark at the left end of the fancy tab bar: seven
+/// hexagons, one centre cell and six around it, clockwise from the top.
+#[derive(Debug, Clone, FromDynamic, ToDynamic)]
+pub struct TabBarBrand {
+    #[dynamic(default = "default_true")]
+    pub enabled: bool,
+    /// Height and width of the mark in pixels at 96 dpi.
+    #[dynamic(default = "default_brand_size")]
+    pub size: f64,
+    /// Space left of the mark, in pixels at 96 dpi.
+    #[dynamic(default = "default_brand_margin_left")]
+    pub margin_left: f64,
+    /// Space between the mark and the first tab, in pixels at 96 dpi.
+    #[dynamic(default = "default_brand_margin_right")]
+    pub margin_right: f64,
+    #[dynamic(default)]
+    pub colors: TabBarBrandColors,
+}
+
+#[derive(Debug, Clone, FromDynamic, ToDynamic)]
+pub struct TabBarBrandColors {
+    /// Fill of the centre cell.
+    #[dynamic(default = "default_brand_center")]
+    pub center: RgbaColor,
+    /// Outline of the centre cell; defaults to a lighter shade of `center`.
+    #[dynamic(default)]
+    pub center_outline: Option<RgbaColor>,
+    /// Glow behind the centre cell; defaults to `center`.
+    #[dynamic(default)]
+    pub glow: Option<RgbaColor>,
+    /// Fills of the six outer cells, clockwise from the top; a shorter list
+    /// repeats from its start.
+    #[dynamic(default = "default_brand_ring")]
+    pub ring: Vec<RgbaColor>,
+    /// Outlines of the outer cells in the same order; defaults to a lighter
+    /// shade of each fill.
+    #[dynamic(default)]
+    pub ring_outline: Vec<RgbaColor>,
+}
+
+impl Default for TabBarBrandColors {
+    fn default() -> Self {
+        Self {
+            center: default_brand_center(),
+            center_outline: None,
+            glow: None,
+            ring: default_brand_ring(),
+            ring_outline: vec![],
+        }
+    }
+}
+
+impl Default for TabBarBrand {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            size: default_brand_size(),
+            margin_left: default_brand_margin_left(),
+            margin_right: default_brand_margin_right(),
+            colors: TabBarBrandColors::default(),
+        }
+    }
+}
+
+fn default_brand_size() -> f64 {
+    28.
+}
+
+fn default_brand_margin_left() -> f64 {
+    10.
+}
+
+fn default_brand_margin_right() -> f64 {
+    8.
+}
+
+fn default_brand_center() -> RgbaColor {
+    (0x1e_u8, 0x90_u8, 0xff_u8).into()
+}
+
+fn default_brand_ring() -> Vec<RgbaColor> {
+    [
+        (0x1e_u8, 0xa8_u8, 0x76_u8),
+        (0x70, 0xaa, 0xee),
+        (0xec, 0x6e, 0x76),
+        (0x70, 0xaa, 0xee),
+        (0x7a, 0x8e, 0xb8),
+        (0x70, 0xaa, 0xee),
+    ]
+    .iter()
+    .copied()
+    .map(RgbaColor::from)
+    .collect()
+}
+
 #[derive(Debug, Clone, FromDynamic, ToDynamic)]
 pub struct WindowFrameConfig {
     #[dynamic(default = "default_inactive_titlebar_bg")]
