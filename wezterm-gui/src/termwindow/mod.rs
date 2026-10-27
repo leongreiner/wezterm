@@ -587,6 +587,7 @@ impl TermWindow {
             self.current_mouse_buttons.clear();
             self.current_mouse_capture = None;
             self.is_click_to_focus_window = false;
+            self.pane_drag = None;
 
             for state in self.pane_state.borrow_mut().values_mut() {
                 state.mouse_terminal_coords.take();
@@ -1031,6 +1032,7 @@ impl TermWindow {
             }
             WindowEvent::AdviseModifiersLedStatus(modifiers, leds) => {
                 self.current_modifier_and_leds = (modifiers, leds);
+                self.pane_drag_modifiers_changed(modifiers, window);
                 self.update_title();
                 window.invalidate();
                 Ok(true)

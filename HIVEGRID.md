@@ -59,11 +59,16 @@ wezterm/wezterm.
   `hivegrid_chrome` / `hivegrid_fixed_width`, and only while two grid panes are visible, so
   not zoomed) starts a drag instead of going to the pane; after 4 px the pane under the
   pointer becomes the target (pointer `Grabbing`, the dragged pane veiled, the target outlined
-  and filled over the half an edge drop would take). The release emits the Lua event
+  and filled over the half an edge drop would take). Once started, the drag goes on without
+  the mouse button (a touchpad finger can be lifted and set down again; further presses are
+  ignored) and the drop happens when the modifiers are released (`AdviseModifiersLedStatus`,
+  `pane_drag_modifiers_changed`), or is dropped silently when the window loses focus. It
+  emits the Lua event
   `pane-drag-drop(window, source, target, zone)` with zone `center`, `left`, `right`, `top` or
   `bottom` (the outer quarter of the target on that side, else `center`); a release over no
-  other grid pane does nothing. The fork only reports the gesture, Hivegrid's `layouts.lua`
-  moves the panes. Empty (the default): off. Stock WezTerm rejects the option.
+  other grid pane does nothing. A press that never moved 4 px just ends with the button. The
+  fork only reports the gesture, Hivegrid's `layouts.lua` moves the panes. Empty (the default):
+  off. Stock WezTerm rejects the option.
 
 - Wayland window drag: the Wayland backend implements `request_drag_move`
   (`xdg_toplevel.move`), which it lacked, so the integrated tab bar can move the window on

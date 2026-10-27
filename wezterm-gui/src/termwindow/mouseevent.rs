@@ -150,7 +150,12 @@ impl super::TermWindow {
                 self.current_mouse_capture = None;
                 self.current_mouse_buttons.retain(|p| p != press);
                 if press == &MousePress::Left && self.pane_drag.is_some() {
-                    self.finish_pane_drag(context);
+                    // A drag that has started goes on without the button, so a touchpad
+                    // finger can be set down again; releasing the modifier drops (see
+                    // `modifiers_changed`). A press that never became a drag just ends.
+                    if self.pane_drag.as_ref().is_some_and(|d| !d.active) {
+                        self.pane_drag = None;
+                    }
                     return;
                 }
                 if press == &MousePress::Left && self.window_drag_position.take().is_some() {
@@ -344,6 +349,10 @@ impl super::TermWindow {
     /// A left press with `pane_drag_modifiers` held on a grid pane starts tracking a drag
     /// (and is not sent to the pane). Needs two grid panes: a zoomed tab shows one.
     fn start_pane_drag(&mut self, event: &MouseEvent, column: usize, row: i64) -> bool {
+        if self.pane_drag.as_ref().is_some_and(|d| d.active) {
+            // Another press while a drag goes on (a finger set down again): not a new drag.
+            return true;
+        }
         let want = self.config.pane_drag_modifiers;
         if want.is_empty() || event.modifiers.remove_positional_mods() != want {
             return false;
@@ -397,7 +406,20 @@ impl super::TermWindow {
         context.invalidate();
     }
 
-    /// The release ends the drag: over another grid pane it emits `pane-drag-drop`
+    /// Releasing the drag modifiers drops the pane (a touchpad often needs the finger moved
+    /// and set down again mid-drag, so the button cannot be what ends it).
+    pub(super) fn pane_drag_modifiers_changed(
+        &mut self,
+        mods: ::window::Modifiers,
+        context: &dyn WindowOps,
+    ) {
+        let want = self.config.pane_drag_modifiers;
+        if self.pane_drag.is_some() && !mods.remove_positional_mods().contains(want) {
+            self.finish_pane_drag(context);
+        }
+    }
+
+    /// Ends the drag: over another grid pane it emits `pane-drag-drop`
     /// (window, dragged pane, target pane, zone), anywhere else it cancels.
     fn finish_pane_drag(&mut self, context: &dyn WindowOps) {
         let drag = match self.pane_drag.take() {
