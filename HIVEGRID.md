@@ -254,10 +254,12 @@ wezterm/wezterm.
     that no Chrome outlives a pane or the GUI; `HGQ_FRONT_END=WebGpu` runs it through wgpu and `HGQ_XFT_DPI=144` at a scale of 1.5.
     Hivegrid's side of the contract (`config/web.lua`, `bin/hivegrid_agents.py`) is tested in the
     main repository (`tests/lua/test_web.lua`, `tests/test_agents_web.py`).
-- Toast urgency (`wezterm-toast-notification/src/dbus.rs`): `window:toast_notification` with a
-  timeout is sent with Normal urgency, so GNOME Shell, dunst and similar servers honour the
-  timeout. Upstream sends every toast as Critical, which those servers never expire. Toasts
-  without a timeout (download finished, update available, fatal errors) stay Critical.
+- Toast urgency (`wezterm-toast-notification/src/dbus.rs`, `wezterm-gui/src/frontend.rs`): a toast
+  with a timeout is sent with Normal urgency, so GNOME Shell, dunst and similar servers honour the
+  timeout. Upstream sends every toast as Critical, which those servers never expire. This covers
+  `window:toast_notification` and the toasts a pane raises with OSC 9 / OSC 777 (an agent
+  finishing), which get a 5 s timeout. Toasts without a timeout (download finished, update
+  available, fatal errors) stay Critical.
 
 ## Build without sudo
 

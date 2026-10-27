@@ -133,7 +133,16 @@ impl GuiFrontEnd {
                                 // FIXME: if notification.focus is true, we should do
                                 // something here to arrange to focus pane_id when the
                                 // notification is clicked
-                                persistent_toast_notification(title, message);
+                                //
+                                // OSC 9 / OSC 777 toasts (an agent finishing) get a timeout like
+                                // window:toast_notification, so the Linux backend sends them with
+                                // Normal urgency and the server expires them.
+                                wezterm_toast_notification::show(ToastNotification {
+                                    title: title.to_string(),
+                                    message: message.to_string(),
+                                    url: None,
+                                    timeout: Some(std::time::Duration::from_secs(5)),
+                                });
                             }
                         }
                     }
