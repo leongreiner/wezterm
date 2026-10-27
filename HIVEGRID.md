@@ -88,6 +88,14 @@ wezterm/wezterm.
   in one pass. Upstream alternated single cells between the sides (the first column of a
   nested grid took half of every change) and could spin forever on the main thread when a
   side was already at its minimum.
+- A closed pane's room (`mux/src/tab.rs` `remove_pane_if`, `return_fixed_width_room`): it is
+  shared out over the whole surviving subtree in proportion, like a tab resize. Upstream left
+  every nested split's first side alone and gave all of it to the last column, so closing the
+  overview dock (a top-level split) after opening it moved columns from the first panes to the
+  last one, a little more each time. A fixed-width pane (a sidebar view) that closes beside
+  another fixed-width one (the bar) gives its columns to the grid side of the split above
+  instead of to the survivor: upstream made the bar as wide as bar + view until Lua narrowed it
+  again, and a Lua that did not run (a failing status handler) left it so.
 - Top-level splits size the new pane: upstream left a pane inserted by a top-level split of a
   tab with two or more panes at the size it was spawned or moved with, and `split-pane
   --left`/`--top` spawned the new pane with the other side's size (`mux/src/domain.rs`); the bar
@@ -125,7 +133,7 @@ wezterm/wezterm.
     url }, set_environment_variables = { ... } }` and `SpawnCommandInNewTab` forward (checked in
     the GUI for `pane:split`). `HIVEGRID_WEB_FLAGS` (read when a pane spawns) adds Chrome flags,
     e.g. `--no-sandbox` where Chrome cannot create its sandbox (unsafe). CLI sugar: `wezterm cli
-    split-pane --url URL [--profile NAME] [--private]` and `wezterm cli spawn --url URL ...`;
+    split-pane --url URL [--profile NAME] [--private] [--browser PATH]` and `wezterm cli spawn --url URL ...`;
     `--url` conflicts with `PROG`, `--cwd` and `--move-pane-id`, and both build the command with
     `mux::webpane::spawn_command`. Stock WezTerm would try to run a program called `hivegrid:web`,
     so the config only uses it when `theme.has_web` is true (the build is recognised by the same
@@ -137,7 +145,23 @@ wezterm/wezterm.
     ignored; mode 0700, cookies and logins persist); a private pane gets an ephemeral browser
     context. The directory name is injective (letters, digits, `-`, `_`, `.` stay, every other
     byte becomes `%XX`), so `a/b` and `a_b` never share a directory, and browsers are keyed by it.
-    Other knobs: `HIVEGRID_CHROME` (binary), `HIVEGRID_WEB_QUALITY`, `HIVEGRID_WEB_SCALE`,
+    Browser binary, highest first (`mux::webpane::browser_choice`, read when a pane spawns): the
+    spawn command's `HIVEGRID_WEB_BROWSER=<absolute path>` (`--browser PATH`, made absolute by the CLI,
+    since the GUI's directory is not the caller's), `HIVEGRID_CHROME` (read by the engine; a set
+    variable also stops the settings from being read), `web.browser` of `$HIVEGRID_SETTINGS` or
+    `~/.config/hivegrid/settings.json` (an absolute path, `"auto"` or anything else is none; the GUI
+    reads the file for each spawn itself, so Lua, `pane:split` env, `SpawnCommandInNewTab`, `wezterm
+    cli` and the Python hive all agree without carrying the path), then the engine's search
+    (`/opt/google/chrome/chrome`, `google-chrome-stable`, `google-chrome`, `chromium`,
+    `chromium-browser` on `PATH`). A named binary that is not an executable file is an error shown
+    in the pane, never a silent fallback. The browser pool is keyed by profile directory alone, not
+    by (profile, binary): two Chromes cannot share one profile directory (the second hands its
+    window to the first and exits), so a view joins the browser already running for its profile
+    whatever binary it asked for, and a changed choice applies to the next browser process of the
+    profile, after the last pane of the profile closed. Chromium-family only (CDP screencast);
+    Firefox has none. Snap and Flatpak browsers are not supported (confined: the hidden profile
+    directory is out of their reach and their launcher does not reliably pass the fd 3/4 pipe).
+    Other knobs: `HIVEGRID_WEB_QUALITY`, `HIVEGRID_WEB_SCALE`,
     `HIVEGRID_WEB_DEVTOOLS` (see Security below, and `hivegrid-web/src/lib.rs`).
   - Security notes for the web pane:
     - Cookies and logins sit in the profile directory under Chrome's *basic* password store
@@ -224,7 +248,7 @@ wezterm/wezterm.
     likeliest conflicts.
   - Tests: `cargo test -p hivegrid-web -p mux` plus `cargo test -p wezterm -p wezterm-gui -- web
     split_pane spawn_command` with the environment `build-hivegrid.sh` sets (`dev/check` runs no
-    cargo, so these run locally). `dev/qa/web-smoke` (local only: Xvfb, Chrome, a test
+    cargo, so these run locally). `dev/qa/web-browser-smoke` (slot 13) covers the browser choice (`--browser`, `web.browser`) with a wrapper script around Chrome. `dev/qa/web-smoke` (local only: Xvfb, Chrome, a test
     build as `HG_WEZTERM_DIR`) drives the real GUI in the QA sandbox and checks pixels, input,
     zoom/resize/move/arrange, dialogs, crash and restart, freezing of hidden tabs, clipboard and
     that no Chrome outlives a pane or the GUI; `HGQ_FRONT_END=WebGpu` runs it through wgpu and `HGQ_XFT_DPI=144` at a scale of 1.5.

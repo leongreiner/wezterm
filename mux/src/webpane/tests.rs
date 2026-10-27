@@ -214,6 +214,7 @@ fn spawn_of(url: &str) -> WebSpawn {
         url: url.to_string(),
         profile: "main".to_string(),
         private: false,
+        browser: None,
     }
 }
 
@@ -266,22 +267,29 @@ fn text_of(pane: &WebPane) -> Vec<String> {
 
 #[test]
 fn spawn_command_round_trips_through_parse_spawn() {
-    let cmd = spawn_command("https://x.test/p", Some("work"), true);
+    let cmd = spawn_command(
+        "https://x.test/p",
+        Some("work"),
+        true,
+        Some(Path::new("/opt/b/chrome")),
+    );
     assert_eq!(
         parse_spawn(&cmd),
         Some(WebSpawn {
             url: "https://x.test/p".into(),
             profile: "work".into(),
-            private: true
+            private: true,
+            browser: Some("/opt/b/chrome".into()),
         })
     );
-    let cmd = spawn_command("https://x.test/", None, false);
+    let cmd = spawn_command("https://x.test/", None, false, None);
     assert_eq!(
         parse_spawn(&cmd),
         Some(WebSpawn {
             url: "https://x.test/".into(),
             profile: "main".into(),
-            private: false
+            private: false,
+            browser: None,
         })
     );
 }
@@ -325,6 +333,92 @@ fn parse_spawn_ignores_the_ambient_environment() {
 }
 
 #[test]
+fn an_empty_or_blank_browser_variable_names_no_browser() {
+    let mut cmd = spawn_command("https://a.test/", None, false, None);
+    cmd.env(ENV_BROWSER, "  ");
+    assert_eq!(parse_spawn(&cmd).unwrap().browser, None);
+}
+
+#[test]
+fn browser_choice_ranks_spawn_over_env_over_settings_over_discovery() {
+    let spawn = Path::new("/s/spawn");
+    let env = std::ffi::OsStr::new("/e/env");
+    let settings = || Some(PathBuf::from("/s/settings"));
+    assert_eq!(
+        browser_choice(Some(spawn), Some(env), settings),
+        Some(spawn.to_path_buf()),
+        "the spawn command beats the environment and the settings"
+    );
+    assert_eq!(
+        browser_choice(None, Some(env), settings),
+        None,
+        "HIVEGRID_CHROME is the engine's own rung: nothing is passed down, and the settings are not read"
+    );
+    assert_eq!(
+        browser_choice(None, None, settings),
+        Some(PathBuf::from("/s/settings"))
+    );
+    assert_eq!(
+        browser_choice(None, Some(std::ffi::OsStr::new("")), settings),
+        Some(PathBuf::from("/s/settings")),
+        "an empty HIVEGRID_CHROME is unset"
+    );
+    assert_eq!(browser_choice(None, None, || None), None, "auto");
+}
+
+#[test]
+fn the_settings_are_not_read_when_a_higher_rung_answers() {
+    let read = std::cell::Cell::new(false);
+    let settings = || {
+        read.set(true);
+        None
+    };
+    browser_choice(Some(Path::new("/x")), None, settings);
+    assert!(!read.get());
+    let settings = || {
+        read.set(true);
+        None
+    };
+    browser_choice(None, Some(std::ffi::OsStr::new("/e")), settings);
+    assert!(!read.get());
+}
+
+#[test]
+fn web_browser_of_the_settings_file() {
+    let read = |json: &str| browser_from_settings(json);
+    assert_eq!(
+        read(r#"{"web": {"browser": "/usr/bin/brave-browser"}}"#),
+        Some(PathBuf::from("/usr/bin/brave-browser"))
+    );
+    assert_eq!(read(r#"{"web": {"browser": "auto"}}"#), None, "auto is no path");
+    assert_eq!(read(r#"{"web": {"browser": "brave"}}"#), None, "a relative path would depend on the GUI's directory");
+    assert_eq!(read(r#"{"web": {"browser": ""}}"#), None);
+    assert_eq!(read(r#"{"web": {"browser": 7}}"#), None);
+    assert_eq!(read(r#"{"web": {"profile": "x"}}"#), None);
+    assert_eq!(read(r#"{"keys": {}}"#), None);
+    assert_eq!(read("not json"), None);
+    assert_eq!(read(""), None);
+}
+
+#[test]
+fn settings_file_is_the_override_else_the_config_directory() {
+    let home = Path::new("/home/u");
+    assert_eq!(
+        settings_file_in(None, home),
+        Path::new("/home/u/.config/hivegrid/settings.json")
+    );
+    assert_eq!(
+        settings_file_in(Some("".into()), home),
+        Path::new("/home/u/.config/hivegrid/settings.json"),
+        "an empty override is unset"
+    );
+    assert_eq!(
+        settings_file_in(Some("/t/s.json".into()), home),
+        Path::new("/t/s.json")
+    );
+}
+
+#[test]
 fn spawn_without_an_engine_explains_itself() {
     // The test binary never calls `enable`.
     assert!(!is_enabled());
@@ -346,6 +440,7 @@ fn creation_passes_url_profile_and_size_to_the_engine() {
         url: "https://e.test/".into(),
         profile: "p1".into(),
         private: true,
+        browser: Some("/opt/b/chrome".into()),
     };
     // No pixel size: 10x20 px cells and 96 dpi are assumed.
     let pane = WebPane::new(&engine, host, 1, 1, size(40, 10, 0, 0, 0), spawn).unwrap();
@@ -354,6 +449,7 @@ fn creation_passes_url_profile_and_size_to_the_engine() {
     assert_eq!(url, "https://e.test/");
     assert_eq!(cfg.profile, "p1");
     assert!(cfg.private);
+    assert_eq!(cfg.chrome.as_deref(), Some(Path::new("/opt/b/chrome")));
     assert!(
         cfg.data_root.ends_with("hivegrid/web"),
         "{:?}",

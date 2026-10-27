@@ -61,8 +61,12 @@ impl std::fmt::Debug for Frame {
 
 #[derive(Clone, Debug, Default)]
 pub struct WebConfig {
-    /// Browser binary; `None` = discover (`HIVEGRID_CHROME`, `/opt/google/chrome/chrome`,
-    /// `google-chrome-stable`, `google-chrome`, `chromium`, `chromium-browser`).
+    /// Browser binary the spawn command or the Settings asked for (`mux::webpane::browser_choice`
+    /// decides which); `None` = discover (`HIVEGRID_CHROME`, `/opt/google/chrome/chrome`,
+    /// `google-chrome-stable`, `google-chrome`, `chromium`, `chromium-browser`). Read when a
+    /// browser process starts: the pool is keyed by profile alone (one Chrome per profile
+    /// directory), so a view joins the browser already running for its profile whatever binary
+    /// it names, and a changed choice applies to the next browser process of the profile.
     pub chrome: Option<PathBuf>,
     /// Profile name; one browser process and one persistent profile directory per name.
     pub profile: String,

@@ -33,7 +33,7 @@ use portable_pty::CommandBuilder;
 use rangeset::RangeSet;
 use std::collections::HashMap;
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -52,6 +52,9 @@ pub const SPAWN_SENTINEL: &str = "hivegrid:web";
 pub const ENV_PROFILE: &str = "HIVEGRID_WEB_PROFILE";
 /// Environment variable (on the spawn command), `1` for an ephemeral profile.
 pub const ENV_PRIVATE: &str = "HIVEGRID_WEB_PRIVATE";
+/// Environment variable (on the spawn command) naming the browser binary of this pane: the
+/// highest rung of the choice (see [`browser_choice`]). `wezterm cli split-pane --browser`.
+pub const ENV_BROWSER: &str = "HIVEGRID_WEB_BROWSER";
 /// Extra browser command line flags, whitespace separated (e.g. `--no-sandbox` when Chrome
 /// cannot create its sandbox; unsafe). Read when a pane is spawned.
 pub const ENV_FLAGS: &str = "HIVEGRID_WEB_FLAGS";
@@ -134,17 +137,30 @@ pub struct WebSpawn {
     pub url: String,
     pub profile: String,
     pub private: bool,
+    /// The browser binary the spawn command names itself, if it does.
+    pub browser: Option<PathBuf>,
 }
 
 /// The spawn command for a web pane: what `wezterm cli split-pane --url` sends and what
-/// Lua's `args = { 'hivegrid:web', url }` plus `set_environment_variables` spell out.
-pub fn spawn_command(url: &str, profile: Option<&str>, private: bool) -> CommandBuilder {
+/// Lua's `args = { 'hivegrid:web', url }` plus `set_environment_variables` spell out. `browser`
+/// is the binary this pane is to use whatever the settings say (see [`browser_choice`]).
+pub fn spawn_command(
+    url: &str,
+    profile: Option<&str>,
+    private: bool,
+    browser: Option<&Path>,
+) -> CommandBuilder {
     let mut cmd = CommandBuilder::from_argv(vec![SPAWN_SENTINEL.into(), url.into()]);
     if let Some(profile) = profile {
         cmd.env(ENV_PROFILE, profile);
     }
     if private {
         cmd.env(ENV_PRIVATE, "1");
+    }
+    if let Some(browser) = browser {
+        // The GUI's working directory is not the caller's: a relative path is made absolute here.
+        let browser = std::path::absolute(browser).unwrap_or_else(|_| browser.to_path_buf());
+        cmd.env(ENV_BROWSER, browser);
     }
     cmd
 }
@@ -171,18 +187,61 @@ pub fn parse_spawn(cmd: &CommandBuilder) -> Option<WebSpawn> {
     });
     let mut profile = DEFAULT_PROFILE.to_string();
     let mut private = false;
+    let mut browser = None;
     for (k, v) in cmd.iter_extra_env_as_str() {
         if k == ENV_PROFILE && !v.trim().is_empty() {
             profile = v.trim().to_string();
         } else if k == ENV_PRIVATE {
             private = v == "1";
+        } else if k == ENV_BROWSER && !v.trim().is_empty() {
+            browser = Some(PathBuf::from(v.trim()));
         }
     }
     Some(WebSpawn {
         url,
         profile,
         private,
+        browser,
     })
+}
+
+/// The browser binary to ask the engine for, or `None` to let it discover one. The rungs, highest
+/// first: what the spawn command names (`--browser`, [`ENV_BROWSER`]), `HIVEGRID_CHROME` (the
+/// engine reads it itself, so a set variable means `None` here), the `web.browser` setting
+/// (`settings`, read only when no higher rung answers), then the engine's own search.
+pub fn browser_choice(
+    spawn: Option<&Path>,
+    chrome_env: Option<&std::ffi::OsStr>,
+    settings: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    if let Some(p) = spawn {
+        return Some(p.to_path_buf());
+    }
+    if chrome_env.is_some_and(|e| !e.is_empty()) {
+        return None;
+    }
+    settings()
+}
+
+/// `web.browser` of the settings file (`$HIVEGRID_SETTINGS`, else
+/// `~/.config/hivegrid/settings.json`, the file the settings panel writes): an absolute path, or
+/// `None` for "auto", a missing or unreadable file and anything that is not a path.
+fn settings_browser() -> Option<PathBuf> {
+    let path = settings_file_in(std::env::var_os("HIVEGRID_SETTINGS"), &config::HOME_DIR);
+    browser_from_settings(&std::fs::read_to_string(path).ok()?)
+}
+
+fn settings_file_in(over: Option<std::ffi::OsString>, home: &Path) -> PathBuf {
+    match over.filter(|o| !o.is_empty()) {
+        Some(p) => PathBuf::from(p),
+        None => home.join(".config").join("hivegrid").join("settings.json"),
+    }
+}
+
+fn browser_from_settings(json: &str) -> Option<PathBuf> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    let path = PathBuf::from(value.get("web")?.get("browser")?.as_str()?.trim());
+    path.is_absolute().then_some(path)
 }
 
 /// The refusal for domains that cannot host a web pane (SSH, mux client): called first thing in
@@ -528,7 +587,11 @@ impl WebPane {
             output_pending: Arc::new(AtomicBool::new(false)),
         };
         let cfg = WebConfig {
-            chrome: None,
+            chrome: browser_choice(
+                spawn.browser.as_deref(),
+                std::env::var_os("HIVEGRID_CHROME").as_deref(),
+                settings_browser,
+            ),
             profile: spawn.profile.clone(),
             private: spawn.private,
             data_root: data_root(),

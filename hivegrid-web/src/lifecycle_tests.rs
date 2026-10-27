@@ -352,6 +352,34 @@ fn a_new_view_after_the_last_one_closed_gets_a_fresh_browser() {
 }
 
 #[test]
+fn a_changed_browser_applies_to_the_next_browser_process_of_the_profile() {
+    // One profile directory is locked by one browser process, so the pool is keyed by profile
+    // alone: a view asking for another binary joins the running browser (a second Chrome on the
+    // same directory would hand the work to the first and exit), and the new binary starts with
+    // the next browser process, after the last view of the profile closed.
+    let h = Harness::new();
+    let with = |path: &str| WebConfig {
+        chrome: Some(path.into()),
+        ..h.cfg("main", false)
+    };
+    let (a, _) = h.open_with("a.example", with("/old/chrome"));
+    wait_running(&a);
+    let (b, _) = h.open_with("b.example", with("/new/chrome"));
+    wait_running(&b);
+    assert_eq!(h.launcher.launches(), 1, "the running browser is joined");
+    assert_eq!(h.launcher.cfgs.lock()[0].chrome.as_deref(), Some(std::path::Path::new("/old/chrome")));
+
+    a.close();
+    b.close();
+    let first = h.launcher.chrome(0);
+    eventually("old browser gone", || first.has_exited());
+    let (c, _) = h.open_with("c.example", with("/new/chrome"));
+    wait_running(&c);
+    assert_eq!(h.launcher.launches(), 2);
+    assert_eq!(h.launcher.cfgs.lock()[1].chrome.as_deref(), Some(std::path::Path::new("/new/chrome")));
+}
+
+#[test]
 fn private_views_use_their_own_context() {
     let h = Harness::new();
     let (shared, _) = h.running("a.example", "main");
@@ -636,6 +664,7 @@ fn popups_only_load_web_addresses_in_the_pane() {
     let h = Harness::new();
     let (v, _) = h.running("example.com", "main");
     let c = h.launcher.chrome(0);
+    eventually("first load done", || v.info().title == "Title of https://example.com" && !v.info().loading);
     let n = c.count("Page.navigate");
     for url in [
         "data:text/html,<script>alert(1)</script>",
@@ -1033,6 +1062,8 @@ fn navigation_to_a_refused_scheme_is_ignored() {
     let h = Harness::new();
     let (v, _) = h.running("example.com", "main");
     let c = h.launcher.chrome(0);
+    // The initial navigation is sent after the view runs: count from once it has loaded.
+    eventually("first load done", || v.info().title == "Title of https://example.com" && !v.info().loading);
     let n = c.count("Page.navigate");
     for url in ["javascript:alert(1)", "chrome://settings", "about:flags", "devtools://devtools/x", "ftp://h/f"] {
         v.navigate(url);

@@ -6,6 +6,7 @@ use mux::pane::PaneId;
 use mux::window::WindowId;
 use portable_pty::cmdbuilder::CommandBuilder;
 use std::ffi::OsString;
+use std::path::PathBuf;
 use wezterm_client::client::Client;
 
 #[derive(Debug, Parser, Clone)]
@@ -57,6 +58,11 @@ pub struct SpawnCommand {
     #[arg(long, requires = "url")]
     private: bool,
 
+    /// With `--url`: the Chromium-family browser binary for this pane, over HIVEGRID_CHROME
+    /// and the Settings choice (a browser already running for the profile is joined).
+    #[arg(long, value_name = "PATH", value_hint=ValueHint::FilePath, requires = "url")]
+    browser: Option<PathBuf>,
+
     /// Instead of executing your shell, run PROG.
     /// For example: `wezterm cli spawn -- bash -l` will spawn bash
     /// as if it were a login shell.
@@ -73,6 +79,7 @@ impl SpawnCommand {
                 url,
                 self.profile.as_deref(),
                 self.private,
+                self.browser.as_deref(),
             ))
         } else if self.prog.is_empty() {
             None
@@ -169,6 +176,8 @@ mod tests {
             "https://example.com/",
             "--profile",
             "p",
+            "--browser",
+            "/opt/b/chrome",
         ])
         .unwrap()
         .pane_command()
@@ -177,6 +186,7 @@ mod tests {
         assert_eq!(spawn.url, "https://example.com/");
         assert_eq!(spawn.profile, "p");
         assert!(!spawn.private);
+        assert_eq!(spawn.browser, Some(PathBuf::from("/opt/b/chrome")));
     }
 
     #[test]
@@ -192,5 +202,6 @@ mod tests {
         assert!(parse(&["--url", "https://a.test/", "--", "bash"]).is_err());
         assert!(parse(&["--url", "https://a.test/", "--cwd", "/tmp"]).is_err());
         assert!(parse(&["--private"]).is_err());
+        assert!(parse(&["--browser", "/opt/b/chrome"]).is_err());
     }
 }

@@ -80,8 +80,8 @@ pub(crate) fn find_chrome_in(
         }
     }
     bail!(
-        "no Chrome or Chromium found: install Google Chrome or Chromium, or set HIVEGRID_CHROME \
-         to the browser binary"
+        "no Chrome or Chromium found: install Google Chrome or Chromium, choose a browser in \
+         Settings (Web), or set HIVEGRID_CHROME to the browser binary"
     )
 }
 

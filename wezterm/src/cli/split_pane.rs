@@ -4,6 +4,7 @@ use mux::pane::PaneId;
 use mux::tab::{SplitDirection, SplitRequest, SplitSize};
 use portable_pty::cmdbuilder::CommandBuilder;
 use std::ffi::OsString;
+use std::path::PathBuf;
 use wezterm_client::client::Client;
 
 #[derive(Debug, Parser, Clone)]
@@ -69,6 +70,11 @@ pub struct SplitPane {
     #[arg(long, requires = "url")]
     private: bool,
 
+    /// With `--url`: the Chromium-family browser binary for this pane, over HIVEGRID_CHROME
+    /// and the Settings choice (a browser already running for the profile is joined).
+    #[arg(long, value_name = "PATH", value_hint=ValueHint::FilePath, requires = "url")]
+    browser: Option<PathBuf>,
+
     /// Instead of spawning a new command, move the specified
     /// pane into the newly created split.
     #[arg(long, conflicts_with_all=&["cwd", "prog", "url"])]
@@ -90,6 +96,7 @@ impl SplitPane {
                 url,
                 self.profile.as_deref(),
                 self.private,
+                self.browser.as_deref(),
             ))
         } else if self.prog.is_empty() {
             None
@@ -191,6 +198,23 @@ mod tests {
     }
 
     #[test]
+    fn browser_travels_with_the_command_as_an_absolute_path() {
+        let spawn = |args: &[&str]| {
+            mux::webpane::parse_spawn(&parse(args).unwrap().pane_command().unwrap()).unwrap()
+        };
+        assert_eq!(
+            spawn(&["--url", "about:blank", "--browser", "/opt/b/chrome"]).browser,
+            Some(PathBuf::from("/opt/b/chrome"))
+        );
+        assert_eq!(spawn(&["--url", "about:blank"]).browser, None);
+        // The GUI's working directory is not the caller's.
+        let rel = spawn(&["--url", "about:blank", "--browser", "wrap/chrome"])
+            .browser
+            .unwrap();
+        assert!(rel.is_absolute() && rel.ends_with("wrap/chrome"), "{rel:?}");
+    }
+
+    #[test]
     fn programs_and_the_default_shell_are_unchanged() {
         assert!(parse(&[]).unwrap().pane_command().is_none());
         let cmd = parse(&["--", "bash", "-l"])
@@ -212,5 +236,6 @@ mod tests {
     fn profile_and_private_need_a_url() {
         assert!(parse(&["--profile", "work"]).is_err());
         assert!(parse(&["--private"]).is_err());
+        assert!(parse(&["--browser", "/opt/b/chrome"]).is_err());
     }
 }

@@ -335,18 +335,33 @@ fn compute_min_size(tree: &Tree) -> (usize, usize) {
     }
 }
 
-/// True for a leaf whose pane asked to keep its width when the tab is resized: the user var
-/// `hivegrid_fixed_width` (the Hivegrid sidebar bar, sidebar views and overview dock), and for
-/// a split whose leaves all did (the bar with a sidebar view beside it).
+/// True for a pane that asked to keep its width when the tab is resized: the user var
+/// `hivegrid_fixed_width` (the Hivegrid sidebar bar, sidebar views and overview dock).
+fn is_fixed_width_pane(pane: &Arc<dyn Pane>) -> bool {
+    pane.copy_user_vars().contains_key("hivegrid_fixed_width")
+}
+
+/// True for a leaf whose pane asked to keep its width when the tab is resized (see
+/// `is_fixed_width_pane`), and for a split whose leaves all did (the bar with a sidebar view
+/// beside it).
 fn is_fixed_width(tree: &Tree) -> bool {
     match tree {
-        Tree::Leaf(pane) => pane.copy_user_vars().contains_key("hivegrid_fixed_width"),
+        Tree::Leaf(pane) => is_fixed_width_pane(pane),
         Tree::Node {
             left,
             right,
             data: Some(_),
         } => is_fixed_width(left) && is_fixed_width(right),
         _ => false,
+    }
+}
+
+/// True when `pane` is one of the leaves of `tree`.
+fn contains_leaf(tree: &Tree, pane: PaneId) -> bool {
+    match tree {
+        Tree::Leaf(leaf) => leaf.pane_id() == pane,
+        Tree::Node { left, right, .. } => contains_leaf(left, pane) || contains_leaf(right, pane),
+        Tree::Empty => false,
     }
 }
 
@@ -1915,6 +1930,8 @@ impl TabInner {
         F: Fn(usize, &Arc<dyn Pane>) -> bool,
     {
         let mut dead_panes = vec![];
+        // Fixed-width survivors of a removal: (pane, the columns it had before the removal).
+        let mut keep_width: Vec<(PaneId, usize)> = vec![];
         let zoomed_pane = self.zoomed.as_ref().map(|p| p.pane_id());
 
         {
@@ -1946,6 +1963,11 @@ impl TabInner {
                             self.zoomed.take();
                         }
                         let parent;
+                        let removed_fixed = is_fixed_width_pane(&pane);
+                        let removed_on_right = cursor
+                            .path_to_root()
+                            .next()
+                            .map_or(false, |(branch, _)| branch == PathBranch::IsRight);
                         match cursor.unsplit_leaf() {
                             Ok((c, dead, p)) => {
                                 dead_panes.push(dead);
@@ -1974,7 +1996,37 @@ impl TabInner {
                             dpi: cell_dims.dpi,
                         };
 
-                        if let Some(unsplit) = cursor.leaf_mut() {
+                        // The closed pane's room goes to the whole surviving subtree in
+                        // proportion, like any other size change (`adjust_x_size`): upstream
+                        // left every node's first side alone and gave all of it to the last
+                        // column of the subtree, so closing the overview dock (a top-level
+                        // split) over and over moved the grid's columns to its last one.
+                        if let Tree::Node {
+                            data: Some(have), ..
+                        } = cursor.subtree()
+                        {
+                            let dx = size.cols as isize - have.width() as isize;
+                            let dy = size.rows as isize - have.height() as isize;
+                            let subtree = cursor.subtree_mut();
+                            adjust_x_size(subtree, dx, &cell_dims);
+                            adjust_y_size(subtree, dy, &cell_dims);
+                        }
+                        let keeps_width = removed_fixed
+                            && parent.direction == SplitDirection::Horizontal
+                            && matches!(cursor.subtree(), Tree::Leaf(p) if is_fixed_width_pane(p));
+                        if keeps_width {
+                            // A fixed-width pane (a sidebar view) closed beside another one
+                            // (the bar): the survivor keeps its columns, see
+                            // `return_fixed_width_room`.
+                            if let Some(unsplit) = cursor.leaf_mut() {
+                                let own = if removed_on_right {
+                                    parent.first
+                                } else {
+                                    parent.second
+                                };
+                                keep_width.push((unsplit.pane_id(), own.cols));
+                            }
+                        } else if let Some(unsplit) = cursor.leaf_mut() {
                             if Some(unsplit.pane_id()) != zoomed_pane {
                                 unsplit.resize(size).ok();
                             }
@@ -2007,6 +2059,13 @@ impl TabInner {
             self.active = active_idx.saturating_sub(removed_indices.len());
         }
 
+        if !keep_width.is_empty() {
+            for (pane, cols) in keep_width {
+                self.return_fixed_width_room(pane, cols);
+            }
+            // The survivors were not resized by the removal itself: the tree's sizes reach them
+            self.apply_sizes();
+        }
         if !dead_panes.is_empty() {
             // The zoom area may have changed (a chrome pane or a hidden one closed)
             self.apply_zoom_size();
@@ -2023,6 +2082,57 @@ impl TabInner {
             .detach();
         }
         dead_panes
+    }
+
+    /// A fixed-width pane (the sidebar view) closed next to another fixed-width one (the
+    /// bar): upstream gave the freed room to the survivor, so the bar stayed as wide as bar +
+    /// view until Lua narrowed it again. The room goes to the other side of the split above
+    /// instead (the grid), shared out in proportion like any resize, and `pane` is back at
+    /// `cols` columns. Nothing changes when there is no such split (no grid beside the
+    /// chrome): the survivor then fills the tab.
+    fn return_fixed_width_room(&mut self, pane: PaneId, cols: usize) {
+        let Some(tree) = self.pane.take() else {
+            return;
+        };
+        let mut cursor = tree.cursor();
+        loop {
+            let delta = match cursor.subtree() {
+                Tree::Node {
+                    left,
+                    right,
+                    data: Some(data),
+                } if data.direction == SplitDirection::Horizontal => {
+                    if is_fixed_width(left) && !is_fixed_width(right) && contains_leaf(left, pane) {
+                        Some(cols as isize - data.first.cols as isize)
+                    } else if is_fixed_width(right)
+                        && !is_fixed_width(left)
+                        && contains_leaf(right, pane)
+                    {
+                        Some(data.second.cols as isize - cols as isize)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            match delta {
+                Some(delta) if delta != 0 => {
+                    self.adjust_node_at_cursor(&mut cursor, delta);
+                    self.cascade_size_from_cursor(cursor);
+                    return;
+                }
+                Some(_) => break,
+                None => {}
+            }
+            match cursor.preorder_next() {
+                Ok(c) => cursor = c,
+                Err(c) => {
+                    cursor = c;
+                    break;
+                }
+            }
+        }
+        self.pane.replace(cursor.tree());
     }
 
     fn can_close_without_prompting(&mut self, reason: CloseReason) -> bool {
@@ -3078,6 +3188,578 @@ mod test {
         // A grid pane: the nearest split, as upstream.
         tab.adjust_pane_size_of(1, PaneDirection::Left, 3);
         assert_eq!((bar.cols(), view.cols(), grid.cols()), (7, 21, 70));
+    }
+
+    /// (bar | view) | grid [| dock] as the Hivegrid sidebar builds it in a 100 column tab; the
+    /// grid is `grid` panes side by side. Returns the tab, the bar, the view, the grid panes
+    /// and the dock when there is one.
+    fn sidebar_tab(
+        grid: usize,
+        dock: bool,
+    ) -> (
+        Tab,
+        Arc<FakePane>,
+        Arc<FakePane>,
+        Vec<Arc<FakePane>>,
+        Option<Arc<FakePane>>,
+    ) {
+        let size = TerminalSize {
+            rows: 30,
+            cols: 100,
+            pixel_width: 1000,
+            pixel_height: 600,
+            dpi: 96,
+        };
+        let panes: Vec<_> = (0..grid)
+            .map(|i| FakePane::typed(10 + i, size, false))
+            .collect();
+        let bar = FakePane::typed(2, size, true);
+        let view = FakePane::typed(3, size, true);
+        let tab = Tab::new(&size);
+        tab.assign_pane(&(panes[0].clone() as Arc<dyn Pane>));
+        // the grid: each new pane splits the last one and takes an equal share of what is left
+        let mut left = 100;
+        for i in 1..grid {
+            let each = (left - (grid - i)) / (grid - i + 1);
+            tab.split_and_insert(
+                i - 1,
+                SplitRequest {
+                    direction: SplitDirection::Horizontal,
+                    target_is_second: true,
+                    size: SplitSize::Cells(left - each - 1),
+                    ..Default::default()
+                },
+                panes[i].clone() as Arc<dyn Pane>,
+            )
+            .unwrap();
+            left -= each + 1;
+        }
+        let dock = dock.then(|| {
+            let dock = FakePane::typed(4, size, true);
+            tab.split_and_insert(
+                0,
+                SplitRequest {
+                    direction: SplitDirection::Horizontal,
+                    top_level: true,
+                    target_is_second: true,
+                    size: SplitSize::Cells(20),
+                },
+                dock.clone() as Arc<dyn Pane>,
+            )
+            .unwrap();
+            dock
+        });
+        // the bar, then the view split off the bar (the sidebar widens the bar first)
+        tab.split_and_insert(
+            0,
+            SplitRequest {
+                direction: SplitDirection::Horizontal,
+                top_level: true,
+                target_is_second: false,
+                size: SplitSize::Cells(5),
+            },
+            bar.clone() as Arc<dyn Pane>,
+        )
+        .unwrap();
+        tab.adjust_pane_size_of(2, PaneDirection::Right, 26);
+        tab.split_and_insert(
+            0,
+            SplitRequest {
+                direction: SplitDirection::Horizontal,
+                top_level: false,
+                target_is_second: true,
+                size: SplitSize::Cells(25),
+            },
+            view.clone() as Arc<dyn Pane>,
+        )
+        .unwrap();
+        (tab, bar, view, panes, dock)
+    }
+
+    /// The Hivegrid sidebar closing its view: the bar must keep its columns and the grid get
+    /// the view's room back at once. Upstream gave a closed pane's room to its sibling, here
+    /// the bar, which stayed as wide as bar + view until a Lua round trip narrowed it again.
+    #[test]
+    fn closing_the_view_gives_its_columns_to_the_grid_not_the_bar() {
+        for (grid, dock) in [(1, false), (3, false), (1, true), (3, true)] {
+            let (tab, bar, view, panes, dock_pane) = sidebar_tab(grid, dock);
+            assert_eq!(bar.cols(), 5, "grid {} dock {}: bar before", grid, dock);
+            let before = view.cols() + 1;
+            let grid_before: usize = panes.iter().map(|p| p.cols()).sum::<usize>() + grid - 1;
+            let dock_before = dock_pane.as_ref().map(|d| d.cols());
+            assert!(tab.remove_pane(3).is_some());
+            assert_eq!(bar.cols(), 5, "grid {} dock {}: bar after", grid, dock);
+            let grid_after: usize = panes.iter().map(|p| p.cols()).sum::<usize>() + grid - 1;
+            assert_eq!(grid_after, grid_before + before, "grid {} dock {}", grid, dock);
+            assert_eq!(dock_pane.as_ref().map(|d| d.cols()), dock_before);
+            // every pane is where the tree says: no overlap, nothing past the tab edge
+            let cols = columns(&tab);
+            assert_eq!(cols[0], (0, 5));
+            let last = cols.iter().map(|(l, w)| l + w).max().unwrap();
+            assert_eq!(last, 100, "grid {} dock {}: {:?}", grid, dock, cols);
+            // an even grid stays even
+            let w: Vec<_> = panes.iter().map(|p| p.cols()).collect();
+            let spread = w.iter().max().unwrap() - w.iter().min().unwrap();
+            assert!(spread <= 1, "grid {} dock {}: {:?}", grid, dock, w);
+        }
+    }
+
+    /// Opening and closing the overview dock (a top-level split) over and over must leave the
+    /// grid as it was. Closing gave the dock's columns to the last grid column alone while
+    /// opening took them from every column in proportion, so each cycle moved columns from the
+    /// first panes to the last one, until the first ones were a few cells wide.
+    #[test]
+    fn dock_open_close_cycles_keep_the_grid_even() {
+        for grid in [2, 3, 4] {
+            let (tab, bar, view, panes, dock) = sidebar_tab(grid, true);
+            let dock = dock.unwrap();
+            assert!(tab.remove_pane(view.pane_id()).is_some());
+            let widths = || panes.iter().map(|p| p.cols()).collect::<Vec<_>>();
+            let start = widths();
+            let spread = |w: &[usize]| w.iter().max().unwrap() - w.iter().min().unwrap();
+            assert!(spread(&start) <= 1, "grid {}: {:?}", grid, start);
+            let mut open = true;
+            for cycle in 0..20 {
+                if open {
+                    assert!(tab.remove_pane(dock.pane_id()).is_some());
+                } else {
+                    tab.split_and_insert(
+                        0,
+                        SplitRequest {
+                            direction: SplitDirection::Horizontal,
+                            top_level: true,
+                            target_is_second: true,
+                            size: SplitSize::Cells(20),
+                        },
+                        dock.clone() as Arc<dyn Pane>,
+                    )
+                    .unwrap();
+                }
+                open = !open;
+                let w = widths();
+                assert!(spread(&w) <= 2, "grid {} cycle {}: {:?}", grid, cycle, w);
+                assert_eq!(dock.cols(), 20, "grid {} cycle {}", grid, cycle);
+                assert_eq!(bar.cols(), 5, "grid {} cycle {}", grid, cycle);
+            }
+        }
+    }
+
+    /// Small deterministic generator (xorshift) for the randomized layout test.
+    struct Rng(u64);
+
+    impl Rng {
+        fn below(&mut self, n: usize) -> usize {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 % n as u64) as usize
+        }
+    }
+
+    /// Every pane has the size the tree gives it, panes and divider cells tile the tab exactly
+    /// (no overlap, nothing uncovered, nothing past the edge) and no pane is empty.
+    fn assert_tiles(tab: &Tab, panes: &[Arc<FakePane>], what: &str) {
+        let size = tab.get_size();
+        let (cols, rows) = (size.cols, size.rows);
+        let mut cells = vec![0u8; cols * rows];
+        let mut mark = |left: usize, top: usize, w: usize, h: usize, id: usize| {
+            assert!(
+                left + w <= cols && top + h <= rows,
+                "{}: {} ({}x{} at {},{}) leaves the {}x{} tab",
+                what,
+                id,
+                w,
+                h,
+                left,
+                top,
+                cols,
+                rows
+            );
+            for y in top..top + h {
+                for x in left..left + w {
+                    assert_eq!(cells[y * cols + x], 0, "{}: {} overlaps at {},{}", what, id, x, y);
+                    cells[y * cols + x] = 1;
+                }
+            }
+        };
+        let positioned = tab.iter_panes_ignoring_zoom();
+        for p in &positioned {
+            assert!(
+                p.width >= 1 && p.height >= 1,
+                "{}: pane {} is {}x{}",
+                what,
+                p.pane.pane_id(),
+                p.width,
+                p.height
+            );
+            mark(p.left, p.top, p.width, p.height, p.pane.pane_id());
+            let fake = panes.iter().find(|f| f.id == p.pane.pane_id()).unwrap();
+            assert_eq!(
+                (fake.cols(), fake.size.lock().rows),
+                (p.width, p.height),
+                "{}: pane {} was not told its size",
+                what,
+                fake.id
+            );
+        }
+        for s in tab.iter_splits() {
+            match s.direction {
+                SplitDirection::Horizontal => mark(s.left, s.top, 1, s.size, 1000 + s.index),
+                SplitDirection::Vertical => mark(s.left, s.top, s.size, 1, 1000 + s.index),
+            }
+        }
+        assert!(
+            cells.iter().all(|c| *c == 1),
+            "{}: cells nothing covers in the {}x{} tab",
+            what,
+            cols,
+            rows
+        );
+    }
+
+    /// Random sequences of everything the Hivegrid config does to a tab (grid splits and
+    /// closes, the bar, a sidebar view, the overview dock, window resizes, divider drags)
+    /// keep the layout consistent: panes tile the tab, the bar and the dock keep their width,
+    /// and no grid pane collapses while the window has room for it.
+    #[test]
+    fn random_layout_operations_stay_consistent() {
+        let mut failures = vec![];
+        for seed in 1..=400u64 {
+            let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+            let size = TerminalSize {
+                rows: 40,
+                cols: 160,
+                pixel_width: 1600,
+                pixel_height: 800,
+                dpi: 96,
+            };
+            let mut next_id = 100;
+            let mut new_pane = |chrome: bool| {
+                next_id += 1;
+                FakePane::typed(next_id, size, chrome)
+            };
+            let first = new_pane(false);
+            let tab = Tab::new(&size);
+            tab.assign_pane(&(first.clone() as Arc<dyn Pane>));
+            let bar = new_pane(true);
+            let mut panes: Vec<Arc<FakePane>> = vec![first.clone(), bar.clone()];
+            let mut grid: Vec<Arc<FakePane>> = vec![first];
+            let (mut view, mut dock): (Option<Arc<FakePane>>, Option<Arc<FakePane>>) = (None, None);
+            let index_of = |tab: &Tab, id: usize| {
+                tab.iter_panes_ignoring_zoom()
+                    .iter()
+                    .position(|p| p.pane.pane_id() == id)
+                    .unwrap()
+            };
+            tab.split_and_insert(
+                0,
+                SplitRequest {
+                    direction: SplitDirection::Horizontal,
+                    top_level: true,
+                    target_is_second: false,
+                    size: SplitSize::Cells(5),
+                },
+                bar.clone() as Arc<dyn Pane>,
+            )
+            .unwrap();
+            let mut log: Vec<String> = vec![];
+            let mut dock_cols = 20;
+            let geometry = |tab: &Tab| {
+                tab.iter_panes_ignoring_zoom()
+                    .iter()
+                    .map(|p| (p.pane.pane_id(), p.left, p.top, p.width, p.height))
+                    .collect::<Vec<_>>()
+            };
+            let mut before_op = geometry(&tab);
+            for step in 0..60 {
+                let what = match rng.below(10) {
+                    0 | 1 => {
+                        // split a grid pane
+                        let target = grid[rng.below(grid.len())].clone();
+                        let dir = if rng.below(2) == 0 {
+                            SplitDirection::Horizontal
+                        } else {
+                            SplitDirection::Vertical
+                        };
+                        let pane = new_pane(false);
+                        let r = SplitRequest {
+                            direction: dir,
+                            top_level: false,
+                            target_is_second: rng.below(2) == 0,
+                            size: if rng.below(2) == 0 {
+                                SplitSize::Percent(20 + rng.below(60) as u8)
+                            } else {
+                                SplitSize::Cells(1 + rng.below(40))
+                            },
+                        };
+                        let ok = tab
+                            .split_and_insert(
+                                index_of(&tab, target.id),
+                                r,
+                                pane.clone() as Arc<dyn Pane>,
+                            )
+                            .is_ok();
+                        if ok {
+                            panes.push(pane.clone());
+                            grid.push(pane);
+                        }
+                        format!("split {} {:?} {:?} ok={}", target.id, dir, r.size, ok)
+                    }
+                    2 if grid.len() > 1 => {
+                        let k = rng.below(grid.len());
+                        let gone = grid.remove(k);
+                        tab.remove_pane(gone.id).unwrap();
+                        panes.retain(|p| p.id != gone.id);
+                        format!("close grid pane {}", gone.id)
+                    }
+                    3 => {
+                        // the overview dock: a top-level split on the right, or its close
+                        match dock.take() {
+                            Some(d) => {
+                                tab.remove_pane(d.id).unwrap();
+                                panes.retain(|p| p.id != d.id);
+                                format!("close dock {}", d.id)
+                            }
+                            None => {
+                                let d = new_pane(true);
+                                let ok = tab
+                                    .split_and_insert(
+                                        0,
+                                        SplitRequest {
+                                            direction: SplitDirection::Horizontal,
+                                            top_level: true,
+                                            target_is_second: true,
+                                            size: SplitSize::Cells(20),
+                                        },
+                                        d.clone() as Arc<dyn Pane>,
+                                    )
+                                    .is_ok();
+                                if ok {
+                                    panes.push(d.clone());
+                                    dock = Some(d);
+                                    dock_cols = 20;
+                                }
+                                format!("open dock ok={}", ok)
+                            }
+                        }
+                    }
+                    4 | 5 => {
+                        // the sidebar view: widen the bar, split the view off it; or close it
+                        match view.take() {
+                            Some(v) => {
+                                tab.remove_pane(v.id).unwrap();
+                                panes.retain(|p| p.id != v.id);
+                                // Lua then narrows the bar if it is not already 5 wide
+                                format!("close view {}", v.id)
+                            }
+                            None => {
+                                let w = 28 + rng.below(20);
+                                tab.adjust_pane_size_of(bar.id, PaneDirection::Right, w + 1);
+                                let cells = bar.cols().saturating_sub(6);
+                                let v = new_pane(true);
+                                let ok = cells >= 8
+                                    && tab
+                                        .split_and_insert(
+                                            index_of(&tab, bar.id),
+                                            SplitRequest {
+                                                direction: SplitDirection::Horizontal,
+                                                top_level: false,
+                                                target_is_second: true,
+                                                size: SplitSize::Cells(cells),
+                                            },
+                                            v.clone() as Arc<dyn Pane>,
+                                        )
+                                        .is_ok();
+                                if ok {
+                                    panes.push(v.clone());
+                                    view = Some(v);
+                                } else {
+                                    let back = bar.cols() as isize - 5;
+                                    if back > 0 {
+                                        tab.adjust_pane_size_of(
+                                            bar.id,
+                                            PaneDirection::Left,
+                                            back as usize,
+                                        );
+                                    }
+                                }
+                                format!("open view w={} ok={}", w, ok)
+                            }
+                        }
+                    }
+                    6 | 7 => {
+                        let cols = 90 + rng.below(140);
+                        let rows = 24 + rng.below(40);
+                        tab.resize(TerminalSize {
+                            rows,
+                            cols,
+                            pixel_width: cols * 10,
+                            pixel_height: rows * 20,
+                            dpi: 96,
+                        });
+                        format!("resize {}x{}", cols, rows)
+                    }
+                    8 => {
+                        let target = grid[rng.below(grid.len())].clone();
+                        let dir = [
+                            PaneDirection::Left,
+                            PaneDirection::Right,
+                            PaneDirection::Up,
+                            PaneDirection::Down,
+                        ][rng.below(4)];
+                        let amount = 1 + rng.below(15);
+                        tab.adjust_pane_size_of(target.id, dir, amount);
+                        // A drag may have moved the bar's or the dock's divider; the Lua side
+                        // puts the bar back at once (settle) and the dock keeps what was dragged.
+                        // (a view squeezed by the drag is widened first: the divider of the
+                        // bar cannot move past it)
+                        if let Some(v) = &view {
+                            if v.cols() < 28 {
+                                tab.adjust_pane_size_of(v.id, PaneDirection::Right, 28 - v.cols());
+                            }
+                        }
+                        let b = bar.cols();
+                        if b != 5 {
+                            let back = if b > 5 {
+                                PaneDirection::Left
+                            } else {
+                                PaneDirection::Right
+                            };
+                            tab.adjust_pane_size_of(bar.id, back, (b as isize - 5).unsigned_abs());
+                        }
+                        dock_cols = dock.as_ref().map_or(20, |d| d.cols());
+                        format!("drag {} {:?} {}", target.id, dir, amount)
+                    }
+                    9 if dock.is_none() && view.is_none() && tab.get_size().cols >= 100 => {
+                        // Opening and closing the dock, or the view, leaves the grid as it
+                        // was (give or take the cells rounding costs).
+                        let before: Vec<(usize, usize, usize)> = grid
+                            .iter()
+                            .map(|g| (g.id, g.cols(), g.size.lock().rows))
+                            .collect();
+                        let use_dock = rng.below(2) == 0;
+                        let opener = new_pane(true);
+                        let ok = if use_dock {
+                            tab.split_and_insert(
+                                0,
+                                SplitRequest {
+                                    direction: SplitDirection::Horizontal,
+                                    top_level: true,
+                                    target_is_second: true,
+                                    size: SplitSize::Cells(20),
+                                },
+                                opener.clone() as Arc<dyn Pane>,
+                            )
+                            .is_ok()
+                        } else {
+                            tab.adjust_pane_size_of(bar.id, PaneDirection::Right, 31);
+                            let cells = bar.cols().saturating_sub(6);
+                            cells >= 8
+                                && tab
+                                    .split_and_insert(
+                                        index_of(&tab, bar.id),
+                                        SplitRequest {
+                                            direction: SplitDirection::Horizontal,
+                                            top_level: false,
+                                            target_is_second: true,
+                                            size: SplitSize::Cells(cells),
+                                        },
+                                        opener.clone() as Arc<dyn Pane>,
+                                    )
+                                    .is_ok()
+                        };
+                        if ok {
+                            panes.push(opener.clone());
+                            tab.remove_pane(opener.id).unwrap();
+                            panes.retain(|p| p.id != opener.id);
+                        }
+                        let b = bar.cols();
+                        if b != 5 {
+                            let back = if b > 5 {
+                                PaneDirection::Left
+                            } else {
+                                PaneDirection::Right
+                            };
+                            tab.adjust_pane_size_of(bar.id, back, (b as isize - 5).unsigned_abs());
+                        }
+                        let after: Vec<(usize, usize, usize)> = grid
+                            .iter()
+                            .map(|g| (g.id, g.cols(), g.size.lock().rows))
+                            .collect();
+                        let what = format!(
+                            "{} cycle ok={}: {:?} -> {:?}",
+                            if use_dock { "dock" } else { "view" },
+                            ok,
+                            before,
+                            after
+                        );
+                        if ok
+                            && before.iter().zip(&after).any(|(b, a)| {
+                                (b.1 as isize - a.1 as isize).abs() > 3
+                                    || (b.2 as isize - a.2 as isize).abs() > 3
+                            })
+                        {
+                            failures.push(format!(
+                                "seed {} step {}: {}; ops: {:?}",
+                                seed, step, what, log
+                            ));
+                            break;
+                        }
+                        what
+                    }
+                    _ => continue,
+                };
+                log.push(what.clone());
+                let after_op = geometry(&tab);
+                // the Lua side narrows a bar that a closed view left wide
+                let bar_cols = bar.cols();
+                if view.is_none() && bar_cols != 5 {
+                    failures.push(format!(
+                        "seed {} step {}: bar {} cols after `{}`; before {:?}; after {:?}; ops: {:?}",
+                        seed,
+                        step,
+                        bar_cols,
+                        what,
+                        before_op,
+                        geometry(&tab),
+                        log
+                    ));
+                    break;
+                }
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    assert_tiles(&tab, &panes, &what)
+                }));
+                if let Err(e) = result {
+                    let msg = e
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+                        .unwrap_or_default();
+                    failures.push(format!("seed {} step {}: {}; ops: {:?}", seed, step, msg, log));
+                    break;
+                }
+                if let Some(d) = &dock {
+                    if d.cols() != dock_cols && tab.get_size().cols >= 100 {
+                        failures.push(format!(
+                            "seed {} step {}: dock {} cols after `{}`; ops: {:?}",
+                            seed,
+                            step,
+                            d.cols(),
+                            what,
+                            log
+                        ));
+                        break;
+                    }
+                }
+                before_op = after_op;
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} of 400 sequences broke the layout, first ones:\n{}",
+            failures.len(),
+            failures.iter().take(6).cloned().collect::<Vec<_>>().join("\n")
+        );
     }
 
     #[test]
