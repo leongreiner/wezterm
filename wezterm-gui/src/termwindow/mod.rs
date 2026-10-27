@@ -160,6 +160,37 @@ pub enum TermWindowNotif {
     },
 }
 
+/// A pane dragged with `pane_drag_modifiers` held. It becomes active once the pointer
+/// has moved a few pixels; `target` is the pane under the pointer and where in it.
+#[derive(Clone, Debug)]
+pub struct PaneDrag {
+    pub source: PaneId,
+    pub start: MouseEvent,
+    pub active: bool,
+    pub target: Option<(PaneId, DropZone)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DropZone {
+    Center,
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl DropZone {
+    pub fn name(self) -> &'static str {
+        match self {
+            DropZone::Center => "center",
+            DropZone::Left => "left",
+            DropZone::Right => "right",
+            DropZone::Top => "top",
+            DropZone::Bottom => "bottom",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UIItemType {
     TabBar(TabBarItem),
@@ -461,6 +492,8 @@ pub struct TermWindow {
 
     ui_items: Vec<UIItem>,
     dragging: Option<(UIItem, MouseEvent)>,
+    /// A pane being dragged onto another one (config `pane_drag_modifiers`).
+    pane_drag: Option<PaneDrag>,
 
     modal: RefCell<Option<Rc<dyn Modal>>>,
 
@@ -806,6 +839,7 @@ impl TermWindow {
             semantic_zones: HashMap::new(),
             ui_items: vec![],
             dragging: None,
+            pane_drag: None,
             last_ui_item: None,
             status_click_press: None,
             is_click_to_focus_window: false,

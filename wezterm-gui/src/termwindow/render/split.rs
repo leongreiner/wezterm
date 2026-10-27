@@ -137,3 +137,72 @@ impl crate::TermWindow {
         Ok(())
     }
 }
+
+impl crate::TermWindow {
+    /// While a pane is dragged (config `pane_drag_modifiers`): the dragged pane is veiled
+    /// and the drop target is outlined in the cursor colour, filled all over for a swap
+    /// (centre) or only over the half the pane would take for an edge drop.
+    pub fn paint_pane_drag(&mut self, layers: &mut TripleLayerQuadAllocator) -> anyhow::Result<()> {
+        use crate::termwindow::DropZone;
+        let Some(drag) = self.pane_drag.clone().filter(|d| d.active) else {
+            return Ok(());
+        };
+        let panes = self.get_panes_to_render();
+        let Some(active) = panes.iter().find(|p| p.is_active) else {
+            return Ok(());
+        };
+        let accent = active.pane.palette().cursor_bg.to_linear();
+        let cell_width = self.render_metrics.cell_size.width as f32;
+        let cell_height = self.render_metrics.cell_size.height as f32;
+        let border = self.get_os_border();
+        let first_row_offset = if self.show_tab_bar && !self.config.tab_bar_at_bottom {
+            self.tab_bar_pixel_height()?
+        } else {
+            0.
+        } + border.top.get() as f32;
+        let (padding_left, padding_top) = self.padding_left_top();
+        let origin_x = padding_left + border.left.get() as f32;
+        let origin_y = padding_top + first_row_offset;
+        let rect_of = |pos: &mux::tab::PositionedPane| {
+            (
+                origin_x + pos.left as f32 * cell_width,
+                origin_y + pos.top as f32 * cell_height,
+                pos.width as f32 * cell_width,
+                pos.height as f32 * cell_height,
+            )
+        };
+
+        if let Some(pos) = panes.iter().find(|p| p.pane.pane_id() == drag.source) {
+            let (x, y, w, h) = rect_of(pos);
+            self.filled_rectangle(layers, 2, euclid::rect(x, y, w, h), accent.mul_alpha(0.12))?;
+        }
+        if let Some((id, zone)) = drag.target {
+            if let Some(pos) = panes.iter().find(|p| p.pane.pane_id() == id) {
+                let (x, y, w, h) = rect_of(pos);
+                let (fx, fy, fw, fh) = match zone {
+                    DropZone::Center => (x, y, w, h),
+                    DropZone::Left => (x, y, w / 2.0, h),
+                    DropZone::Right => (x + w / 2.0, y, w / 2.0, h),
+                    DropZone::Top => (x, y, w, h / 2.0),
+                    DropZone::Bottom => (x, y + h / 2.0, w, h / 2.0),
+                };
+                self.filled_rectangle(
+                    layers,
+                    2,
+                    euclid::rect(fx, fy, fw, fh),
+                    accent.mul_alpha(0.3),
+                )?;
+                let t = (self.render_metrics.underline_height as f32).max(2.0);
+                for r in [
+                    euclid::rect(x, y, w, t),
+                    euclid::rect(x, y + h - t, w, t),
+                    euclid::rect(x, y, t, h),
+                    euclid::rect(x + w - t, y, t, h),
+                ] {
+                    self.filled_rectangle(layers, 2, r, accent)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}

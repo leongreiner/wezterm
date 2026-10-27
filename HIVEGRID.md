@@ -54,6 +54,16 @@ wezterm/wezterm.
   `termwindow/render/brand_mark_shapes.rs`, rendered through `ElementContent::Mark`.
   `tab_bar_floating_tabs` draws tabs and "+" as rounded chips centred in the bar, level
   with the status boxes. Both are rejected by stock WezTerm: set them with `pcall`.
+- Pane drag and drop (`pane_drag_modifiers`, `termwindow/mouseevent.rs`, `render/split.rs`
+  `paint_pane_drag`): a left press with exactly these modifiers on a grid pane (not
+  `hivegrid_chrome` / `hivegrid_fixed_width`, and only while two grid panes are visible, so
+  not zoomed) starts a drag instead of going to the pane; after 4 px the pane under the
+  pointer becomes the target (pointer `Grabbing`, the dragged pane veiled, the target outlined
+  and filled over the half an edge drop would take). The release emits the Lua event
+  `pane-drag-drop(window, source, target, zone)` with zone `center`, `left`, `right`, `top` or
+  `bottom` (the outer quarter of the target on that side, else `center`); a release over no
+  other grid pane does nothing. The fork only reports the gesture, Hivegrid's `layouts.lua`
+  moves the panes. Empty (the default): off. Stock WezTerm rejects the option.
 
 - Wayland window drag: the Wayland backend implements `request_drag_move`
   (`xdg_toplevel.move`), which it lacked, so the integrated tab bar can move the window on

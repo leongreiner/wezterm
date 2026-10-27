@@ -1,6 +1,7 @@
 use crate::tabbar::TabBarItem;
 use crate::termwindow::{
-    GuiWin, MouseCapture, PositionedSplit, ScrollHit, TermWindowNotif, UIItem, UIItemType, TMB,
+    DropZone, GuiWin, MouseCapture, PaneDrag, PositionedSplit, ScrollHit, TermWindowNotif, UIItem,
+    UIItemType, TMB,
 };
 use ::window::{
     CursorIcon, MouseButtons as WMB, MouseEvent, MouseEventKind as WMEK, MousePress,
@@ -26,6 +27,10 @@ use wezterm_term::{ClickPosition, LastMouseClick, StableRowIndex};
 /// Pixels the mouse must travel with the left button held on a clickable status
 /// segment before the press counts as a window drag instead of a click.
 const STATUS_CLICK_DRAG_THRESHOLD: isize = 4;
+
+/// Share of a pane's width or height, from each edge, that drops the dragged pane beside it
+/// instead of in its place.
+const DROP_EDGE_BAND: f32 = 0.25;
 
 impl super::TermWindow {
     fn resolve_ui_item(&self, event: &MouseEvent) -> Option<UIItem> {
@@ -144,6 +149,10 @@ impl super::TermWindow {
             WMEK::Release(ref press) => {
                 self.current_mouse_capture = None;
                 self.current_mouse_buttons.retain(|p| p != press);
+                if press == &MousePress::Left && self.pane_drag.is_some() {
+                    self.finish_pane_drag(context);
+                    return;
+                }
                 if press == &MousePress::Left && self.window_drag_position.take().is_some() {
                     // Completed a window drag
                     return;
@@ -155,6 +164,9 @@ impl super::TermWindow {
             }
 
             WMEK::Press(ref press) => {
+                if press == &MousePress::Left && self.start_pane_drag(&event, x, y) {
+                    return;
+                }
                 capture_mouse = true;
 
                 // Perform click counting
@@ -177,6 +189,10 @@ impl super::TermWindow {
             }
 
             WMEK::Move => {
+                if self.pane_drag.is_some() {
+                    self.move_pane_drag(&event, x, y, context);
+                    return;
+                }
                 let left_held = self.current_mouse_buttons.contains(&MousePress::Left);
                 if let Some((MousePress::Left, _, start)) =
                     self.status_click_press.as_ref().filter(|_| left_held)
@@ -286,6 +302,139 @@ impl super::TermWindow {
         if prior_ui_item != ui_item {
             self.update_title_post_status();
         }
+    }
+
+    /// True for panes that are part of the grid (not the sidebar bar, a sidebar view or the
+    /// overview dock): the only ones that can be dragged or dropped on.
+    fn is_grid_pane(pane: &Arc<dyn Pane>) -> bool {
+        let vars = pane.copy_user_vars();
+        !vars.contains_key("hivegrid_chrome") && !vars.contains_key("hivegrid_fixed_width")
+    }
+
+    /// The grid pane under cell (column, row) and where in it, as a drop target.
+    fn pane_drop_target(&self, column: usize, row: i64) -> Option<(PaneId, DropZone)> {
+        let pos = self.get_panes_to_render().into_iter().find(|pos| {
+            Self::is_grid_pane(&pos.pane)
+                && row >= pos.top as i64
+                && row < (pos.top + pos.height) as i64
+                && column >= pos.left
+                && column < pos.left + pos.width
+        })?;
+        let fx = (column - pos.left) as f32 / pos.width.max(1) as f32;
+        let fy = (row - pos.top as i64) as f32 / pos.height.max(1) as f32;
+        let edges = [
+            (fx, DropZone::Left),
+            (1.0 - fx, DropZone::Right),
+            (fy, DropZone::Top),
+            (1.0 - fy, DropZone::Bottom),
+        ];
+        let (dist, zone) = edges
+            .iter()
+            .copied()
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .unwrap();
+        let zone = if dist < DROP_EDGE_BAND {
+            zone
+        } else {
+            DropZone::Center
+        };
+        Some((pos.pane.pane_id(), zone))
+    }
+
+    /// A left press with `pane_drag_modifiers` held on a grid pane starts tracking a drag
+    /// (and is not sent to the pane). Needs two grid panes: a zoomed tab shows one.
+    fn start_pane_drag(&mut self, event: &MouseEvent, column: usize, row: i64) -> bool {
+        let want = self.config.pane_drag_modifiers;
+        if want.is_empty() || event.modifiers.remove_positional_mods() != want {
+            return false;
+        }
+        let panes = self.get_panes_to_render();
+        if panes.iter().filter(|p| Self::is_grid_pane(&p.pane)).count() < 2 {
+            return false;
+        }
+        let source = match self.pane_drop_target(column, row) {
+            Some((id, _)) => id,
+            None => return false,
+        };
+        self.pane_drag = Some(PaneDrag {
+            source,
+            start: event.clone(),
+            active: false,
+            target: None,
+        });
+        true
+    }
+
+    fn move_pane_drag(
+        &mut self,
+        event: &MouseEvent,
+        column: usize,
+        row: i64,
+        context: &dyn WindowOps,
+    ) {
+        let (source, active) = match self.pane_drag.as_ref() {
+            Some(d) => {
+                let dx = event.coords.x - d.start.coords.x;
+                let dy = event.coords.y - d.start.coords.y;
+                (
+                    d.source,
+                    d.active || dx * dx + dy * dy > STATUS_CLICK_DRAG_THRESHOLD.pow(2),
+                )
+            }
+            None => return,
+        };
+        if !active {
+            return;
+        }
+        let target = self
+            .pane_drop_target(column, row)
+            .filter(|(id, _)| *id != source);
+        if let Some(d) = self.pane_drag.as_mut() {
+            d.active = true;
+            d.target = target;
+        }
+        context.set_cursor(Some(CursorIcon::Grabbing));
+        context.invalidate();
+    }
+
+    /// The release ends the drag: over another grid pane it emits `pane-drag-drop`
+    /// (window, dragged pane, target pane, zone), anywhere else it cancels.
+    fn finish_pane_drag(&mut self, context: &dyn WindowOps) {
+        let drag = match self.pane_drag.take() {
+            Some(d) => d,
+            None => return,
+        };
+        context.set_cursor(Some(CursorIcon::Default));
+        context.invalidate();
+        let (target, zone) = match (drag.active, drag.target) {
+            (true, Some(t)) => t,
+            _ => return,
+        };
+
+        async fn dispatch_pane_drag_drop(
+            lua: Option<Rc<mlua::Lua>>,
+            window: GuiWin,
+            source: MuxPane,
+            target: MuxPane,
+            zone: &'static str,
+        ) -> anyhow::Result<()> {
+            if let Some(lua) = lua {
+                let args = lua.pack_multi((window, source, target, zone))?;
+                config::lua::emit_event(&lua, ("pane-drag-drop".to_string(), args))
+                    .await
+                    .map_err(|e| {
+                        log::error!("while processing pane-drag-drop event: {:#}", e);
+                        e
+                    })?;
+            }
+            Ok(())
+        }
+        let window = GuiWin::new(self);
+        let (source, target) = (MuxPane(drag.source), MuxPane(target));
+        promise::spawn::spawn(config::with_lua_config_on_main_thread(move |lua| {
+            dispatch_pane_drag_drop(lua, window, source, target, zone.name())
+        }))
+        .detach();
     }
 
     pub fn mouse_leave_impl(&mut self, context: &dyn WindowOps) {

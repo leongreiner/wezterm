@@ -545,6 +545,11 @@ pub struct Config {
     #[dynamic(default)]
     pub tab_bar_brand: Option<TabBarBrand>,
 
+    /// Modifiers that, held with a left press on a pane, drag that pane onto another one
+    /// (a Lua `pane-drag-drop` event on release). Empty: pane dragging is off.
+    #[dynamic(default)]
+    pub pane_drag_modifiers: Modifiers,
+
     /// If true, hide the tab bar if the window only has a single tab.
     #[dynamic(default)]
     pub hide_tab_bar_if_only_one_tab: bool,
