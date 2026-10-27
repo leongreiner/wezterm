@@ -31,10 +31,10 @@ mod lifecycle_tests;
 mod urls;
 mod view;
 
-pub use apc::{ApcCommand, ApcParser};
+pub use apc::{ApcCommand, ApcParser, HeaderOp};
 pub use engine::CdpEngine;
 pub use frame::take_decode_times;
-pub use urls::normalize_url;
+pub use urls::{normalize_url, resolve_location};
 
 use std::path::PathBuf;
 use std::sync::Arc;

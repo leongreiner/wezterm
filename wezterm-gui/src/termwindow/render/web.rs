@@ -297,17 +297,30 @@ impl WebRenderState {
     }
 }
 
+/// What `paint_pane` still has to draw of a pane after `paint_web_pane`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WebPaint {
+    /// Not a web pane, or one without a frame (starting, crashed, no texture): the pane's cells
+    /// are drawn as for any pane.
+    Cells,
+    /// The page is queued as a texture: nothing else to draw.
+    Page,
+    /// The page is queued as a texture below the header row, which is drawn from the pane's
+    /// cells. No scroll bar or anything else of a terminal pane.
+    PageWithHeader,
+}
+
 impl crate::TermWindow {
-    /// Called by `paint_pane` for every pane: `true` when the pane is a web pane with a frame
-    /// and has been queued for drawing, so the cell renderer must skip it.
+    /// Called by `paint_pane` for every pane: queues the page of a web pane that has a frame
+    /// (below its header row, when it has one) and says what is left to draw.
     pub fn paint_web_pane(
         &mut self,
         pos: &PositionedPane,
         metrics: &PaneMetrics,
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<WebPaint> {
         let web = match pos.pane.downcast_ref::<WebPane>() {
             Some(web) => web,
-            None => return Ok(false),
+            None => return Ok(WebPaint::Cells),
         };
         let pane_id = pos.pane.pane_id();
         let state = self.render_state.as_ref().unwrap();
@@ -317,11 +330,11 @@ impl crate::TermWindow {
             Some(frame) => frame,
             None => {
                 state.web.surfaces.borrow_mut().forget(pane_id);
-                return Ok(false);
+                return Ok(WebPaint::Cells);
             }
         };
         if state.web.alloc_failed.borrow().get(&pane_id) == Some(&(frame.width, frame.height)) {
-            return Ok(false);
+            return Ok(WebPaint::Cells);
         }
         let context = state.context.clone();
         let synced = state
@@ -350,7 +363,7 @@ impl crate::TermWindow {
                     .borrow_mut()
                     .insert(pane_id, (frame.width, frame.height));
                 state.web.surfaces.borrow_mut().forget(pane_id);
-                return Ok(false);
+                return Ok(WebPaint::Cells);
             }
         };
         let border = if pos.is_active {
@@ -358,12 +371,19 @@ impl crate::TermWindow {
         } else {
             None
         };
+        let header_rows = web.header_rows().min(pos.height.saturating_sub(1));
         state.web.draws.borrow_mut().push(WebDraw {
-            rect: pane_pixel_rect(pos.left, pos.top, pos.width, pos.height, metrics),
+            rect: pane_pixel_rect(
+                pos.left,
+                pos.top + header_rows,
+                pos.width,
+                pos.height - header_rows,
+                metrics,
+            ),
             tex,
             border,
         });
-        Ok(true)
+        Ok(if header_rows == 0 { WebPaint::Page } else { WebPaint::PageWithHeader })
     }
 
     /// Called at the end of a paint pass: tell web panes that appeared or went away.

@@ -227,8 +227,9 @@ impl crate::TermWindow {
         }
 
         // Hivegrid: a web pane with a frame is a texture drawn after layer 0 (render/web.rs);
-        // one without (starting, crashed) falls through to its placeholder text.
-        if self.paint_web_pane(
+        // one without (starting, crashed) falls through to its placeholder text, and the header
+        // row of one with a frame is drawn from its cells like any line.
+        let web_paint = self.paint_web_pane(
             pos,
             &super::web::PaneMetrics {
                 cell_width,
@@ -237,7 +238,8 @@ impl crate::TermWindow {
                 border_left: border.left.get() as f32,
                 top_pixel_y,
             },
-        )? {
+        )?;
+        if web_paint == super::web::WebPaint::Page {
             return Ok(());
         }
 
@@ -246,7 +248,10 @@ impl crate::TermWindow {
         // do a per-pane scrollbar.  That will require more extensive
         // changes to ScrollHit, mouse positioning, PositionedPane
         // and tab size calculation.
-        if pos.is_active && self.show_scroll_bar {
+        if pos.is_active
+            && self.show_scroll_bar
+            && web_paint != super::web::WebPaint::PageWithHeader
+        {
             let thumb_y_offset = top_bar_height as usize + border.top.get();
 
             let min_height = self.min_scroll_bar_height();

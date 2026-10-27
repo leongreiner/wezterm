@@ -25,6 +25,18 @@ pub enum ApcCommand {
     Zoom(u32),
     /// Put the DevTools inspector URL on the clipboard (only with `HIVEGRID_WEB_DEVTOOLS=1`).
     Devtools,
+    /// Show, hide or toggle the pane's header row. Pane-level: the view knows nothing of it.
+    Header(HeaderOp),
+    /// Start typing in the pane's address field. Pane-level.
+    Location,
+}
+
+/// What `header;<op>` asks of the header row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderOp {
+    Toggle,
+    Show,
+    Hide,
 }
 
 impl ApcCommand {
@@ -47,6 +59,10 @@ impl ApcCommand {
             ("restart", None) => Some(ApcCommand::Restart),
             ("copy-url", None) => Some(ApcCommand::CopyUrl),
             ("devtools", None) => Some(ApcCommand::Devtools),
+            ("location", None) => Some(ApcCommand::Location),
+            ("header", Some("toggle")) => Some(ApcCommand::Header(HeaderOp::Toggle)),
+            ("header", Some("show")) => Some(ApcCommand::Header(HeaderOp::Show)),
+            ("header", Some("hide")) => Some(ApcCommand::Header(HeaderOp::Hide)),
             ("zoom", Some(a)) => {
                 let pct: u32 = a.trim().trim_end_matches('%').parse().ok()?;
                 (10..=500).contains(&pct).then_some(ApcCommand::Zoom(pct))
@@ -56,7 +72,8 @@ impl ApcCommand {
     }
 
     /// Execute on `view`. `copy-url` and `devtools` do not act on the page: they return the text
-    /// the pane should put on the clipboard (`MuxNotification::AssignClipboard`).
+    /// the pane should put on the clipboard (`MuxNotification::AssignClipboard`). `header` and
+    /// `location` belong to the pane, which handles them itself; here they do nothing.
     pub fn apply(&self, view: &dyn WebView) -> Option<String> {
         match self {
             ApcCommand::Navigate(u) => view.navigate(u),
@@ -71,6 +88,7 @@ impl ApcCommand {
                 return (!url.is_empty()).then_some(url);
             }
             ApcCommand::Devtools => return view.devtools_url(),
+            ApcCommand::Header(_) | ApcCommand::Location => {}
         }
         None
     }
@@ -198,6 +216,10 @@ mod tests {
             ("hgweb;copy-url", ApcCommand::CopyUrl),
             ("hgweb;devtools", ApcCommand::Devtools),
             ("hgweb;zoom;125", ApcCommand::Zoom(125)),
+            ("hgweb;location", ApcCommand::Location),
+            ("hgweb;header;toggle", ApcCommand::Header(HeaderOp::Toggle)),
+            ("hgweb;header;show", ApcCommand::Header(HeaderOp::Show)),
+            ("hgweb;header;hide", ApcCommand::Header(HeaderOp::Hide)),
             ("hgweb;zoom;80%", ApcCommand::Zoom(80)),
         ];
         for (body, want) in cases {

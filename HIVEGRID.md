@@ -227,9 +227,28 @@ wezterm/wezterm.
     keywords, and a view's events reach the GUI as at most one queued redraw per pane.
   - Control channel: `ESC _ hgweb ; <command> [; <arg>] ESC \` written to the pane (Lua
     `pane:send_text`, `wezterm cli send-text --no-paste`): `navigate;URL`, `back`, `forward`,
-    `reload`, `hardreload`, `stop`, `restart`, `copy-url`, `zoom;PERCENT`, `devtools` (only with
-    `HIVEGRID_WEB_DEVTOOLS=1`). Output of a program in a terminal pane never reaches it: the
-    sequence has to be written to the web pane itself.
+    `reload`, `hardreload`, `stop`, `restart`, `copy-url`, `zoom;PERCENT`, `header;toggle|show|hide`,
+    `location` (header row, below) and `devtools` (only with `HIVEGRID_WEB_DEVTOOLS=1`). Output of
+    a program in a terminal pane never reaches it: the sequence has to be written to the web pane
+    itself.
+  - Header row (`mux/src/webpane/header.rs`, `webpane.rs` `HeaderCtl`): row 0 of a web pane's
+    cell grid is a browser header: back, forward and reload (a stop button while loading), an
+    address field and a collapse button, drawn by the placeholder terminal as escape text, so
+    the cell renderer draws it like any line. A pane under 3 rows has none; narrower than 30
+    columns it loses the three buttons, narrower than 8 the collapse button. While it is shown
+    the page is `rows - 1` rows tall (`view_size`, `WebPane::header_rows`) and `paint_web_pane`
+    returns `WebPaint::PageWithHeader` and queues the texture below it, so `paint_pane` still
+    paints the row's cells (and no scroll bar); hiding it (`header;hide`, `header;toggle`, the
+    collapse button) resizes the page to the whole pane. Mouse events on row 0 go to the header
+    (hover, click) unless a button pressed in the page is still held; the page's mouse
+    coordinates start below the row. Typing: a click on the field, `location` or Ctrl+L starts
+    an edit (the page's URL selected; a hidden header shows for the edit only), and while it
+    runs every key, paste and composed text belongs to the field and none reaches the page;
+    Enter resolves the text with `hivegrid_web::resolve_location` (an address as
+    `normalize_url` reads it, else a search with `web.search` of `settings.json`, Google when
+    the key is absent) and navigates, an unopenable location stays in the field with the
+    reason in its place until the next key, Esc or a click on the page ends the edit. The
+    state is per pane and not persisted.
   - What Hivegrid reads from it: the user var `hivegrid_web=1` (Lua: `pane:get_user_vars()`);
     in `wezterm cli list` a web pane has `is_web: true` (the field is new in codec 47; `false`
     for every other pane), `tty_name: null`, the page URL as `cwd` (any scheme but `file:`) and

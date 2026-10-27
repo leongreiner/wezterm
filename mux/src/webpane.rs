@@ -45,6 +45,8 @@ use wezterm_term::{
     Alert, ClipboardSelection, KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     StableRowIndex, Terminal, TerminalConfiguration, TerminalSize,
 };
+use header::{layout, Edit, EditKey, Header, Hit, Hover};
+use hivegrid_web::{ApcCommand, HeaderOp};
 
 /// The program name that asks a domain for a web pane instead of a process.
 pub const SPAWN_SENTINEL: &str = "hivegrid:web";
@@ -60,6 +62,8 @@ pub const ENV_BROWSER: &str = "HIVEGRID_WEB_BROWSER";
 pub const ENV_FLAGS: &str = "HIVEGRID_WEB_FLAGS";
 const DEFAULT_PROFILE: &str = "main";
 const DEFAULT_URL: &str = "about:blank";
+/// The search engine of a location that is no address when the settings do not say (Google).
+const DEFAULT_SEARCH: &str = "https://www.google.com/search?q=%s";
 /// How the engine words a browser exit (`hivegrid_web`); the placeholder does not repeat it.
 const CRASH_PREFIX: &str = "Browser engine exited";
 
@@ -244,6 +248,26 @@ fn browser_from_settings(json: &str) -> Option<PathBuf> {
     path.is_absolute().then_some(path)
 }
 
+/// `web.search` of the settings file: the URL template (with `%s`) typed words become. Google
+/// when the file has no such key (or no file); `None` (no search) when the key is empty or is
+/// not an http(s) template. The Lua and Python readers agree (`config/settings.lua`).
+fn settings_search() -> Option<String> {
+    let path = settings_file_in(std::env::var_os("HIVEGRID_SETTINGS"), &config::HOME_DIR);
+    search_from_settings(std::fs::read_to_string(path).ok().as_deref())
+}
+
+fn search_from_settings(json: Option<&str>) -> Option<String> {
+    let value = json.and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok());
+    let stored = value.as_ref().and_then(|v| v.get("web")).and_then(|w| w.get("search"));
+    match stored {
+        None => Some(DEFAULT_SEARCH.to_string()),
+        Some(s) => s
+            .as_str()
+            .filter(|t| t.contains("%s") && (t.starts_with("http://") || t.starts_with("https://")))
+            .map(str::to_string),
+    }
+}
+
 /// The refusal for domains that cannot host a web pane (SSH, mux client): called first thing in
 /// their spawn paths so the sentinel is never run as a program on a remote.
 pub fn refuse_in_remote_domain(cmd: Option<&CommandBuilder>) -> Result<()> {
@@ -345,10 +369,12 @@ fn normalize_size(mut size: TerminalSize) -> TerminalSize {
     size
 }
 
-fn view_size(size: &TerminalSize) -> ViewSize {
+/// The page's share of a pane: the pane minus its header row.
+fn view_size(size: &TerminalSize, header_rows: usize) -> ViewSize {
+    let cell_h = size.pixel_height / size.rows.max(1);
     ViewSize {
         pixel_width: size.pixel_width as u32,
-        pixel_height: size.pixel_height as u32,
+        pixel_height: size.pixel_height.saturating_sub(header_rows * cell_h).max(1) as u32,
         dpi: size.dpi,
     }
 }
@@ -437,13 +463,16 @@ fn fit_columns(s: &str, cols: usize) -> String {
 /// What the placeholder terminal shows now.
 struct Placeholder {
     term: Terminal,
-    shown: Option<Vec<String>>,
+    /// The header row and the lines below it as last written.
+    shown: Option<(Option<String>, Vec<String>)>,
 }
 
 impl Placeholder {
-    fn show(&mut self, lines: Vec<String>) {
-        if self.shown.as_ref() == Some(&lines) {
-            return;
+    fn show(&mut self, header: Option<String>, lines: Vec<String>) {
+        if let Some((h, l)) = &self.shown {
+            if *h == header && *l == lines {
+                return;
+            }
         }
         // Home, erase display and scrollback, hide the cursor, no wrap marks.
         let mut text = String::from("\x1b[?25l\x1b[H\x1b[2J\x1b[3J");
@@ -452,6 +481,10 @@ impl Placeholder {
         // Rows used so far: a long line wraps onto several, and text past the last row would
         // scroll the first rows (the URL) away.
         let mut used = 0;
+        if let Some(header) = &header {
+            text.push_str(header);
+            used = 1;
+        }
         for (i, line) in lines.iter().enumerate() {
             if used >= rows {
                 break;
@@ -470,7 +503,7 @@ impl Placeholder {
             used += height;
         }
         self.term.advance_bytes(text);
-        self.shown = Some(lines);
+        self.shown = Some((header, lines));
     }
 }
 
@@ -527,11 +560,162 @@ impl Events {
     }
 }
 
+/// What the header row and the control channel share with the pane: the header state and the
+/// ways it changes the view and the placeholder. No lock is held across another.
+struct HeaderCtl {
+    pane_id: PaneId,
+    view: Arc<dyn WebView>,
+    host: Arc<dyn WebHost>,
+    output_pending: Arc<AtomicBool>,
+    placeholder: Arc<Mutex<Placeholder>>,
+    header: Mutex<Header>,
+}
+
+impl HeaderCtl {
+    fn pane_size(&self) -> TerminalSize {
+        self.placeholder.lock().term.get_size()
+    }
+
+    /// Rows the header takes of the pane now: 0 or 1.
+    fn rows(&self) -> usize {
+        let rows = self.pane_size().rows;
+        self.header.lock().rows(rows)
+    }
+
+    fn redraw(&self) {
+        self.host.pane_output(self.pane_id, &self.output_pending);
+    }
+
+    /// Applies `f` to the header. When that adds or removes the row, the page is resized to what
+    /// is left of the pane. The pane is drawn again either way.
+    fn change<R>(&self, f: impl FnOnce(&mut Header) -> R) -> R {
+        let size = self.pane_size();
+        let (result, before, after) = {
+            let mut h = self.header.lock();
+            let before = h.rows(size.rows);
+            let result = f(&mut h);
+            (result, before, h.rows(size.rows))
+        };
+        if before != after {
+            self.placeholder.lock().shown = None;
+            self.view.resize(view_size(&size, after));
+        }
+        self.redraw();
+        result
+    }
+
+    fn apply(&self, op: HeaderOp) {
+        self.change(|h| {
+            h.shown = match op {
+                HeaderOp::Toggle => !h.shown,
+                HeaderOp::Show => true,
+                HeaderOp::Hide => false,
+            };
+            if !h.shown {
+                h.edit = None;
+                h.error = None;
+            }
+        });
+    }
+
+    fn is_editing(&self) -> bool {
+        self.header.lock().edit.is_some()
+    }
+
+    /// Start typing in the address field, the page's address selected. A hidden header is shown
+    /// for the edit only.
+    fn begin_edit(&self) {
+        let url = self.view.info().url;
+        self.change(|h| {
+            if h.edit.is_none() {
+                h.edit = Some(Edit::new(if url == "about:blank" { "" } else { &url }));
+                h.error = None;
+            }
+        });
+    }
+
+    fn cancel_edit(&self) {
+        if self.is_editing() {
+            self.change(|h| {
+                h.edit = None;
+                h.error = None;
+            });
+        }
+    }
+
+    fn edit_key(&self, key: EditKey) {
+        self.change(|h| {
+            h.error = None;
+            if let Some(e) = &mut h.edit {
+                e.key(key);
+            }
+        });
+    }
+
+    fn edit_insert(&self, text: &str) {
+        self.change(|h| {
+            h.error = None;
+            if let Some(e) = &mut h.edit {
+                e.insert(text);
+            }
+        });
+    }
+
+    /// Enter in the field: open the address, or search for the words. A location that cannot
+    /// be opened stays in the field, with the reason in its place until the next key.
+    fn commit(&self) {
+        let text = match &self.header.lock().edit {
+            Some(e) => e.text(),
+            None => return,
+        };
+        if text.trim().is_empty() {
+            self.cancel_edit();
+            return;
+        }
+        match hivegrid_web::resolve_location(&text, settings_search().as_deref()) {
+            Ok(url) => {
+                self.view.navigate(&url);
+                self.cancel_edit();
+            }
+            Err(why) => self.change(|h| h.error = Some(why)),
+        }
+    }
+
+    fn set_hover(&self, hover: Hover) {
+        {
+            let mut h = self.header.lock();
+            if h.hover == hover {
+                return;
+            }
+            h.hover = hover;
+        }
+        self.redraw();
+    }
+
+    /// A press on a part of the header row.
+    fn click(&self, hit: Option<Hit>) {
+        if hit != Some(Hit::Field) {
+            self.cancel_edit();
+        }
+        let info = self.view.info();
+        match hit {
+            Some(Hit::Back) if info.can_go_back => self.view.back(),
+            Some(Hit::Forward) if info.can_go_forward => self.view.forward(),
+            Some(Hit::Reload) if info.loading => self.view.stop(),
+            Some(Hit::Reload) => self.view.reload(false),
+            Some(Hit::Field) => self.begin_edit(),
+            Some(Hit::Collapse) => self.apply(HeaderOp::Hide),
+            _ => {}
+        }
+    }
+}
+
 /// `Pane::writer` of a web pane: bytes written to it are the control channel.
 struct ControlWriter {
     pane_id: PaneId,
     view: Arc<dyn WebView>,
     host: Arc<dyn WebHost>,
+    ctl: Arc<HeaderCtl>,
     parser: ApcParser,
 }
 
@@ -539,6 +723,17 @@ impl std::io::Write for ControlWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         for command in self.parser.feed(buf) {
             log::debug!("web pane {}: {:?}", self.pane_id, command);
+            match &command {
+                ApcCommand::Header(op) => {
+                    self.ctl.apply(*op);
+                    continue;
+                }
+                ApcCommand::Location => {
+                    self.ctl.begin_edit();
+                    continue;
+                }
+                _ => {}
+            }
             if let Some(text) = command.apply(&*self.view) {
                 self.host.notify(MuxNotification::AssignClipboard {
                     pane_id: self.pane_id,
@@ -564,7 +759,9 @@ pub struct WebPane {
     /// The page closed itself (`window.close()`).
     closed: Arc<AtomicBool>,
     killed: AtomicBool,
-    placeholder: Mutex<Placeholder>,
+    placeholder: Arc<Mutex<Placeholder>>,
+    /// The header row (state, editing) and what it does to the view.
+    ctl: Arc<HeaderCtl>,
     writer: Mutex<ControlWriter>,
     pointer: Mutex<Pointer>,
 }
@@ -580,11 +777,12 @@ impl WebPane {
     ) -> Result<Self> {
         let size = normalize_size(size);
         let closed = Arc::new(AtomicBool::new(false));
+        let output_pending = Arc::new(AtomicBool::new(false));
         let events = Events {
             pane_id,
             host: Arc::clone(&host),
             closed: Arc::clone(&closed),
-            output_pending: Arc::new(AtomicBool::new(false)),
+            output_pending: Arc::clone(&output_pending),
         };
         let cfg = WebConfig {
             chrome: browser_choice(
@@ -602,7 +800,7 @@ impl WebPane {
         let view = engine.create_view(
             &spawn.url,
             &cfg,
-            view_size(&size),
+            view_size(&size, Header::new().rows(size.rows)),
             Box::new(move |event| events.handle(event)),
         )?;
 
@@ -613,10 +811,20 @@ impl WebPane {
             config::wezterm_version(),
             Box::new(Vec::new()),
         );
+        let placeholder = Arc::new(Mutex::new(Placeholder { term, shown: None }));
+        let ctl = Arc::new(HeaderCtl {
+            pane_id,
+            view: Arc::clone(&view),
+            host: Arc::clone(&host),
+            output_pending,
+            placeholder: Arc::clone(&placeholder),
+            header: Mutex::new(Header::new()),
+        });
         let writer = ControlWriter {
             pane_id,
             view: Arc::clone(&view),
             host: Arc::clone(&host),
+            ctl: Arc::clone(&ctl),
             parser: ApcParser::new(),
         };
         Ok(Self {
@@ -627,7 +835,8 @@ impl WebPane {
             initial_url: sanitize_display(&spawn.url, MAX_URL_CHARS),
             closed,
             killed: AtomicBool::new(false),
-            placeholder: Mutex::new(Placeholder { term, shown: None }),
+            placeholder,
+            ctl,
             writer: Mutex::new(writer),
             pointer: Mutex::new(Pointer {
                 buttons: 0,
@@ -646,10 +855,16 @@ impl WebPane {
         self.frame().map(|f| f.seq).unwrap_or(0)
     }
 
-    /// Size in physical pixels the page is rendered at.
+    /// Size in physical pixels the page is rendered at: the pane without its header row.
     pub fn view_pixel_size(&self) -> (u32, u32) {
-        let size = self.size();
-        (size.pixel_width as u32, size.pixel_height as u32)
+        let v = view_size(&self.size(), self.ctl.rows());
+        (v.pixel_width, v.pixel_height)
+    }
+
+    /// Rows at the top of the pane the page does not cover: 1 while the header row is shown,
+    /// else 0. The renderer starts the page texture below them.
+    pub fn header_rows(&self) -> usize {
+        self.ctl.rows()
     }
 
     pub fn set_visible(&self, visible: bool) {
@@ -666,9 +881,15 @@ impl WebPane {
 
     /// The placeholder terminal, brought up to date with the view.
     fn term(&self) -> MappedMutexGuard<'_, Terminal> {
-        let lines = placeholder_lines(&self.initial_url, &self.view.info(), &self.view.state());
+        let info = self.view.info();
+        let size = self.size();
+        let header = {
+            let h = self.ctl.header.lock();
+            (h.rows(size.rows) == 1).then(|| h.render(size.cols, &info))
+        };
+        let lines = placeholder_lines(&self.initial_url, &info, &self.view.state());
         let mut ph = self.placeholder.lock();
-        ph.show(lines);
+        ph.show(header, lines);
         MutexGuard::map(ph, |ph| &mut ph.term)
     }
 
@@ -679,10 +900,21 @@ impl WebPane {
     fn mouse_event_at(&self, event: MouseEvent, now: Instant) -> Result<()> {
         let size = self.size();
         let mods = hivegrid_web::keys::cdp_modifiers(event.modifiers);
+        let header_rows = self.ctl.rows();
+        let mut pointer = self.pointer.lock();
+        // The header row takes the pointer, unless a press that began in the page is still held
+        // (a drag may leave the page).
+        if header_rows == 1 && event.y == 0 && pointer.buttons == 0 {
+            drop(pointer);
+            self.header_mouse(&size, &event);
+            return Ok(());
+        }
+        self.ctl.set_hover(Hover::default());
         let (px, py) = pane_pixel_position(&size, &event);
+        let header_px = header_rows * (size.pixel_height / size.rows.max(1)).max(1);
+        let py = (py - header_px as f32).max(0.0);
         let scale = css_scale(&size);
         let (x, y) = (px / scale, py / scale);
-        let mut pointer = self.pointer.lock();
 
         let mut web = WebMouse {
             kind: WebMouseKind::Move,
@@ -721,6 +953,7 @@ impl WebPane {
                 let Some((button, bit)) = dom_button(event.button) else {
                     return Ok(());
                 };
+                self.ctl.cancel_edit();
                 let count = match &pointer.last_press {
                     Some(last)
                         if last.button == button
@@ -771,6 +1004,18 @@ impl WebPane {
         drop(pointer);
         self.view.mouse(web);
         Ok(())
+    }
+
+    /// A pointer event on the header row.
+    fn header_mouse(&self, size: &TerminalSize, event: &MouseEvent) {
+        let hit = layout(size.cols).hit(event.x);
+        match event.kind {
+            MouseEventKind::Move => self.ctl.set_hover(Hover { in_header: true, hit }),
+            MouseEventKind::Press if matches!(event.button, MouseButton::Left) => {
+                self.ctl.click(hit)
+            }
+            _ => {}
+        }
     }
 
     fn is_copy_key(key: &KeyCode, mods: KeyModifiers) -> bool {
@@ -862,12 +1107,20 @@ impl Pane for WebPane {
     }
 
     fn send_paste(&self, text: &str) -> Result<()> {
-        self.view.insert_text(text);
+        if self.ctl.is_editing() {
+            self.ctl.edit_insert(text);
+        } else {
+            self.view.insert_text(text);
+        }
         Ok(())
     }
 
     fn send_composed_text(&self, text: &str) -> Result<()> {
-        self.view.insert_text(text);
+        if self.ctl.is_editing() {
+            self.ctl.edit_insert(text);
+        } else {
+            self.view.insert_text(text);
+        }
         Ok(())
     }
 
@@ -893,18 +1146,33 @@ impl Pane for WebPane {
             // Reflowed text: draw it again at the next read.
             ph.shown = None;
         }
-        self.view.resize(view_size(&size));
+        self.view.resize(view_size(&size, self.ctl.header.lock().rows(size.rows)));
         Ok(())
     }
 
     fn key_down(&self, key: KeyCode, mods: KeyModifiers) -> Result<()> {
+        let mods = mods.remove_positional_mods();
+        // The address field takes every key while it is being typed in.
+        if self.ctl.is_editing() {
+            match field_key(&key, mods) {
+                FieldKey::Commit => self.ctl.commit(),
+                FieldKey::Cancel => self.ctl.cancel_edit(),
+                FieldKey::Edit(k) => self.ctl.edit_key(k),
+                FieldKey::Text(s) => self.ctl.edit_insert(&s),
+                FieldKey::Ignore => {}
+            }
+            return Ok(());
+        }
         if self.is_crashed() {
             if key == KeyCode::Enter {
                 self.view.restart();
             }
             return Ok(());
         }
-        let mods = mods.remove_positional_mods();
+        if is_location_key(&key, mods) {
+            self.ctl.begin_edit();
+            return Ok(());
+        }
         if Self::is_copy_key(&key, mods) {
             // The selection text comes back as `WebEvent::ClipboardText`.
             self.view.copy_selection();
@@ -918,7 +1186,7 @@ impl Pane for WebPane {
     }
 
     fn key_up(&self, key: KeyCode, mods: KeyModifiers) -> Result<()> {
-        if self.is_crashed() {
+        if self.is_crashed() || self.ctl.is_editing() {
             return Ok(());
         }
         self.view.key(WebKey {
@@ -934,6 +1202,7 @@ impl Pane for WebPane {
     }
 
     fn mouse_leave(&self) {
+        self.ctl.set_hover(Hover::default());
         self.view.mouse(WebMouse {
             kind: WebMouseKind::Move,
             x: -1.0,
@@ -989,6 +1258,15 @@ impl Pane for WebPane {
     }
 
     fn mouse_pointer_shape(&self) -> Option<String> {
+        let hover = self.ctl.header.lock().hover;
+        if hover.in_header {
+            let shape = match hover.hit {
+                Some(Hit::Field) => "text",
+                Some(_) => "pointer",
+                None => "default",
+            };
+            return Some(shape.to_string());
+        }
         self.view.cursor()
     }
 
@@ -1010,6 +1288,60 @@ impl Pane for WebPane {
         None
     }
 }
+
+/// Ctrl+L: type in the address field, as in a browser.
+fn is_location_key(key: &KeyCode, mods: KeyModifiers) -> bool {
+    mods == Modifiers::CTRL && matches!(key, KeyCode::Char('l') | KeyCode::Char('L') | KeyCode::Char('\u{c}'))
+}
+
+/// What a key does in the address field.
+#[derive(Debug, PartialEq, Eq)]
+enum FieldKey {
+    Commit,
+    Cancel,
+    Edit(EditKey),
+    Text(String),
+    /// Swallowed: a key that is neither text nor an editing command never reaches the page.
+    Ignore,
+}
+
+fn field_key(key: &KeyCode, mods: KeyModifiers) -> FieldKey {
+    let ctrl = mods.contains(Modifiers::CTRL);
+    match key {
+        KeyCode::Enter | KeyCode::Char('\r') | KeyCode::Char('\n') => FieldKey::Commit,
+        KeyCode::Escape | KeyCode::Char('\u{1b}') => FieldKey::Cancel,
+        KeyCode::Backspace | KeyCode::Char('\u{8}') | KeyCode::Char('\u{7f}') => {
+            FieldKey::Edit(if ctrl { EditKey::DeleteWord } else { EditKey::Backspace })
+        }
+        KeyCode::Delete => FieldKey::Edit(EditKey::Delete),
+        KeyCode::LeftArrow => FieldKey::Edit(EditKey::Left),
+        KeyCode::RightArrow => FieldKey::Edit(EditKey::Right),
+        KeyCode::Home => FieldKey::Edit(EditKey::Home),
+        KeyCode::End => FieldKey::Edit(EditKey::End),
+        KeyCode::Char(c) => {
+            // A control character is Ctrl plus a letter (Ctrl+A is U+0001).
+            let letter = match *c {
+                c if ('\u{1}'..='\u{1a}').contains(&c) => Some((c as u8 - 1 + b'a') as char),
+                c if ctrl => Some(c.to_ascii_lowercase()),
+                _ => None,
+            };
+            match letter {
+                Some('a') => FieldKey::Edit(EditKey::Home),
+                Some('e') => FieldKey::Edit(EditKey::End),
+                Some('u') => FieldKey::Edit(EditKey::KillToStart),
+                Some('k') => FieldKey::Edit(EditKey::KillToEnd),
+                Some('w') => FieldKey::Edit(EditKey::DeleteWord),
+                Some('l') => FieldKey::Edit(EditKey::SelectAll),
+                Some(_) => FieldKey::Ignore,
+                None if mods.intersects(Modifiers::ALT | Modifiers::SUPER) => FieldKey::Ignore,
+                None => FieldKey::Text(c.to_string()),
+            }
+        }
+        _ => FieldKey::Ignore,
+    }
+}
+
+mod header;
 
 #[cfg(test)]
 mod tests;

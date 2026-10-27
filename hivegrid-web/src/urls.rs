@@ -40,6 +40,48 @@ pub fn normalize_url(input: &str) -> Option<String> {
     None
 }
 
+/// What a typed location stands for, as the web pane's address field and Lua's `normalize_url`
+/// agree on it: a URL as [`normalize_url`] reads it, else a search for the words when `search`
+/// (a template with `%s`) is given. An address with a scheme that is not allowed
+/// (`javascript:`, `chrome:`, ...) is refused, never searched for.
+pub fn resolve_location(input: &str, search: Option<&str>) -> Result<String, String> {
+    let s = input.trim();
+    if s.is_empty() {
+        return Err("nothing to open".to_string());
+    }
+    if s.chars().any(char::is_control) {
+        return Err("not a web address".to_string());
+    }
+    let spaced = s.chars().any(char::is_whitespace);
+    if !spaced {
+        if let Some(url) = normalize_url(s) {
+            return Ok(url);
+        }
+        if let Some(scheme) = scheme_of(s) {
+            if !has_port(s) {
+                return Err(format!("cannot open a {scheme}: address in a web pane"));
+            }
+        }
+    }
+    match search {
+        Some(template) => Ok(template.replace("%s", &percent_encode(s))),
+        None => Err("not a web address, and no search engine is set (Settings, Web)".to_string()),
+    }
+}
+
+/// Everything but unreserved characters (`A-Za-z0-9-_.~`) as `%XX` of its UTF-8 bytes.
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 /// The leading `scheme` of `scheme:rest`.
 fn scheme_of(s: &str) -> Option<&str> {
     let i = s.find(':')?;
@@ -176,5 +218,35 @@ mod tests {
         ] {
             assert_eq!(n(u), None, "{u:?}");
         }
+    }
+
+    const GOOGLE: &str = "https://www.google.com/search?q=%s";
+
+    #[test]
+    fn a_location_is_an_address_or_a_search() {
+        let r = |s: &str| resolve_location(s, Some(GOOGLE));
+        assert_eq!(r("example.com/a").unwrap(), "https://example.com/a");
+        assert_eq!(r("localhost:3000").unwrap(), "http://localhost:3000");
+        assert_eq!(r("about:blank").unwrap(), "about:blank");
+        assert_eq!(r("rust lifetimes").unwrap(), "https://www.google.com/search?q=rust%20lifetimes");
+        assert_eq!(r("word").unwrap(), "https://www.google.com/search?q=word");
+        assert_eq!(r("  a&b=c/é  ").unwrap(), "https://www.google.com/search?q=a%26b%3Dc%2F%C3%A9");
+        assert_eq!(r("data: hello world").unwrap(), "https://www.google.com/search?q=data%3A%20hello%20world");
+    }
+
+    #[test]
+    fn a_refused_scheme_is_never_searched_for() {
+        for u in ["javascript:alert(1)", "chrome://settings", "about:flags", "view-source:https://x.co", "mailto:a@b.co"] {
+            let err = resolve_location(u, Some(GOOGLE)).unwrap_err();
+            assert!(err.starts_with("cannot open a "), "{u}: {err}");
+        }
+    }
+
+    #[test]
+    fn without_a_search_engine_words_are_refused_and_empty_is_nothing() {
+        assert!(resolve_location("two words", None).unwrap_err().contains("no search engine"));
+        assert_eq!(resolve_location("example.com", None).unwrap(), "https://example.com");
+        assert_eq!(resolve_location("  \t", Some(GOOGLE)).unwrap_err(), "nothing to open");
+        assert!(resolve_location("a\u{1b}b", Some(GOOGLE)).is_err());
     }
 }

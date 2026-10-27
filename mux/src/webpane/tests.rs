@@ -218,7 +218,15 @@ fn spawn_of(url: &str) -> WebSpawn {
     }
 }
 
+/// A pane without its header row: most tests are about the page (mouse and key forwarding, sizes)
+/// and the placeholder, which fill the whole pane then. `fixture_header_sized` keeps the row.
 fn fixture_sized(s: TerminalSize) -> Fixture {
+    let f = fixture_header_sized(s);
+    f.pane.ctl.header.lock().shown = false;
+    f
+}
+
+fn fixture_header_sized(s: TerminalSize) -> Fixture {
     let engine = FakeEngine::new();
     let host = Arc::new(FakeHost::default());
     let pane = WebPane::new(
@@ -236,6 +244,11 @@ fn fixture_sized(s: TerminalSize) -> Fixture {
 /// 80x24 cells of 10x20 px at scale 1.
 fn fixture() -> Fixture {
     fixture_sized(size(80, 24, 800, 480, 96))
+}
+
+/// The same with its header row.
+fn fixture_header() -> Fixture {
+    fixture_header_sized(size(80, 24, 800, 480, 96))
 }
 
 fn mouse(
@@ -459,11 +472,11 @@ fn creation_passes_url_profile_and_size_to_the_engine() {
         *vs,
         ViewSize {
             pixel_width: 400,
-            pixel_height: 200,
+            pixel_height: 180,
             dpi: 96
         }
     );
-    assert_eq!(pane.view_pixel_size(), (400, 200));
+    assert_eq!(pane.view_pixel_size(), (400, 180));
 }
 
 #[test]
@@ -1298,4 +1311,283 @@ fn placeholder_text_is_bounded() {
     let lines = placeholder_lines("about:blank", &info, &WebState::Running);
     assert_eq!(lines[0].chars().count(), MAX_URL_CHARS);
     assert_eq!(lines[1].chars().count(), MAX_TITLE_CHARS);
+}
+
+fn send(f: &Fixture, body: &str) {
+    let mut w = f.pane.writer();
+    w.write_all(format!("\x1b_hgweb;{body}\x1b\\").as_bytes()).unwrap();
+}
+
+fn press(f: &Fixture, key: KeyCode) {
+    f.pane.key_down(key, KeyModifiers::NONE).unwrap();
+}
+
+fn type_text(f: &Fixture, text: &str) {
+    for c in text.chars() {
+        press(f, KeyCode::Char(c));
+    }
+}
+
+fn header_row(f: &Fixture) -> String {
+    text_of(&f.pane)[0].clone()
+}
+
+fn with_settings<R>(json: Option<&str>, run: impl FnOnce() -> R) -> R {
+    // Serialised: the settings path is process-wide.
+    static LOCK: Mutex<()> = Mutex::new(());
+    let _guard = LOCK.lock();
+    let dir = std::env::temp_dir().join(format!("hgweb-settings-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("settings.json");
+    match json {
+        Some(j) => std::fs::write(&path, j).unwrap(),
+        None => {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+    let old = std::env::var_os("HIVEGRID_SETTINGS");
+    std::env::set_var("HIVEGRID_SETTINGS", &path);
+    let out = run();
+    match old {
+        Some(v) => std::env::set_var("HIVEGRID_SETTINGS", v),
+        None => std::env::remove_var("HIVEGRID_SETTINGS"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    out
+}
+
+#[test]
+fn the_header_takes_the_first_row_and_the_page_gets_the_rest() {
+    let f = fixture_header();
+    assert_eq!(f.pane.header_rows(), 1);
+    assert_eq!(f.pane.view_pixel_size(), (800, 460));
+    f.engine.view.set_info("https://example.org/x", "Example");
+    let row = header_row(&f);
+    assert!(row.contains("https://example.org/x"), "{:?}", row);
+    assert!(row.ends_with('▴'), "{:?}", row);
+    assert!(row.starts_with(" ‹  ›  ↻ "), "{:?}", row);
+}
+
+#[test]
+fn hiding_the_header_returns_its_row_to_the_page_and_showing_takes_it_back() {
+    let f = fixture_header();
+    send(&f, "header;hide");
+    assert_eq!(f.pane.header_rows(), 0);
+    assert_eq!(f.pane.view_pixel_size(), (800, 480));
+    assert_eq!(text_of(&f.pane)[0], "https://example.com/a?b=c", "the placeholder starts at the top");
+    send(&f, "header;toggle");
+    assert_eq!((f.pane.header_rows(), f.pane.view_pixel_size()), (1, (800, 460)));
+    send(&f, "header;toggle");
+    send(&f, "header;hide");
+    assert_eq!(f.pane.header_rows(), 0);
+    assert_eq!(f.engine.view.calls(), vec!["resize 800x480@96", "resize 800x460@96", "resize 800x480@96"]);
+}
+
+#[test]
+fn a_pane_too_short_for_a_header_has_none_and_gets_it_when_taller() {
+    let f = fixture_header_sized(size(80, 2, 800, 40, 96));
+    assert_eq!((f.pane.header_rows(), f.pane.view_pixel_size()), (0, (800, 40)));
+    f.pane.resize(size(80, 10, 800, 200, 96)).unwrap();
+    assert_eq!((f.pane.header_rows(), f.pane.view_pixel_size()), (1, (800, 180)));
+}
+
+#[test]
+fn page_mouse_positions_start_below_the_header_and_the_header_never_reaches_the_page() {
+    let f = fixture_header();
+    f.pane.mouse_event(mouse(MouseEventKind::Press, MouseButton::Left, 10, 5, 3, 4)).unwrap();
+    let m = f.engine.view.mouse();
+    assert_eq!((m[0].x, m[0].y), (103.0, 84.0), "row 5 is 4 rows of page, 4 px down");
+    f.pane.mouse_event(mouse(MouseEventKind::Release, MouseButton::Left, 10, 5, 3, 4)).unwrap();
+    f.engine.view.st.lock().mouse.clear();
+    f.pane.mouse_event(mouse(MouseEventKind::Move, MouseButton::None, 10, 0, 3, 4)).unwrap();
+    f.pane.mouse_event(mouse(MouseEventKind::Press, MouseButton::Left, 10, 0, 3, 4)).unwrap();
+    f.pane.mouse_event(mouse(MouseEventKind::Release, MouseButton::Left, 10, 0, 3, 4)).unwrap();
+    assert!(f.engine.view.mouse().is_empty());
+}
+
+#[test]
+fn a_drag_that_leaves_the_page_over_the_header_stays_with_the_page() {
+    let f = fixture_header();
+    f.pane.mouse_event(mouse(MouseEventKind::Press, MouseButton::Left, 10, 5, 0, 0)).unwrap();
+    f.pane.mouse_event(mouse(MouseEventKind::Move, MouseButton::Left, 10, 0, 0, 0)).unwrap();
+    let m = f.engine.view.mouse();
+    assert_eq!(m.len(), 2);
+    assert_eq!(m[1].y, 0.0, "clamped to the top of the page");
+}
+
+#[test]
+fn header_buttons_drive_the_view() {
+    let f = fixture_header();
+    let click = |x: usize| {
+        f.pane.mouse_event(mouse(MouseEventKind::Press, MouseButton::Left, x, 0, 0, 0)).unwrap();
+        f.pane.mouse_event(mouse(MouseEventKind::Release, MouseButton::Left, x, 0, 0, 0)).unwrap();
+    };
+    click(1);
+    click(4);
+    assert!(f.engine.view.calls().is_empty(), "back and forward do nothing without history");
+    {
+        let mut st = f.engine.view.st.lock();
+        st.info.can_go_back = true;
+        st.info.can_go_forward = true;
+    }
+    click(1);
+    click(4);
+    click(7);
+    f.engine.view.st.lock().info.loading = true;
+    click(7);
+    assert_eq!(f.engine.view.calls(), vec!["back", "forward", "reload false", "stop"]);
+    click(78);
+    assert_eq!(f.pane.header_rows(), 0, "the collapse button hides the header");
+}
+
+#[test]
+fn typing_an_address_in_the_field_opens_it() {
+    let f = fixture_header();
+    f.pane.mouse_event(mouse(MouseEventKind::Press, MouseButton::Left, 30, 0, 0, 0)).unwrap();
+    assert!(f.ctl_editing());
+    type_text(&f, "example.org/x");
+    press(&f, KeyCode::Enter);
+    assert_eq!(f.engine.view.calls(), vec!["navigate https://example.org/x"]);
+    assert!(!f.ctl_editing());
+}
+
+#[test]
+fn words_in_the_field_become_a_search_with_the_settings_engine() {
+    let f = fixture_header();
+    with_settings(None, || {
+        send(&f, "location");
+        type_text(&f, "rust lifetimes");
+        press(&f, KeyCode::Enter);
+    });
+    with_settings(Some(r#"{"web":{"search":"https://duck.example/?q=%s"}}"#), || {
+        send(&f, "location");
+        type_text(&f, "a&b");
+        press(&f, KeyCode::Enter);
+    });
+    assert_eq!(
+        f.engine.view.calls(),
+        vec![
+            "navigate https://www.google.com/search?q=rust%20lifetimes",
+            "navigate https://duck.example/?q=a%26b",
+        ]
+    );
+}
+
+#[test]
+fn a_location_that_cannot_open_stays_in_the_field_with_the_reason() {
+    let f = fixture_header();
+    with_settings(Some(r#"{"web":{"search":""}}"#), || {
+        send(&f, "location");
+        type_text(&f, "two words");
+        press(&f, KeyCode::Enter);
+        assert!(f.ctl_editing());
+        assert!(header_row(&f).contains("no search engine"), "{:?}", header_row(&f));
+        press(&f, KeyCode::Backspace);
+        assert!(header_row(&f).contains("two word"), "the next key shows the text again");
+    });
+    with_settings(None, || {
+        press(&f, KeyCode::Escape);
+        send(&f, "location");
+        type_text(&f, "javascript:alert(1)");
+        press(&f, KeyCode::Enter);
+        assert!(header_row(&f).contains("cannot open a javascript:"));
+    });
+    assert!(f.engine.view.calls().is_empty());
+}
+
+#[test]
+fn while_typing_no_key_reaches_the_page_and_escape_gives_the_field_up() {
+    let f = fixture_header();
+    send(&f, "location");
+    type_text(&f, "abc");
+    press(&f, KeyCode::Tab);
+    press(&f, KeyCode::UpArrow);
+    f.pane.key_up(KeyCode::Char('a'), KeyModifiers::NONE).unwrap();
+    f.pane.send_paste("def").unwrap();
+    f.pane.send_composed_text("é").unwrap();
+    assert!(f.engine.view.st.lock().keys.is_empty());
+    assert!(f.engine.view.calls().is_empty(), "nothing was inserted into the page");
+    assert!(header_row(&f).contains("abcdefé"), "{:?}", header_row(&f));
+    press(&f, KeyCode::Escape);
+    assert!(!f.ctl_editing());
+    press(&f, KeyCode::Char('x'));
+    assert_eq!(f.engine.view.st.lock().keys.len(), 1, "keys go to the page again");
+}
+
+#[test]
+fn location_on_a_hidden_header_shows_it_for_the_edit_only() {
+    let f = fixture_header();
+    send(&f, "header;hide");
+    send(&f, "location");
+    assert_eq!((f.pane.header_rows(), f.pane.view_pixel_size()), (1, (800, 460)));
+    type_text(&f, "example.org");
+    press(&f, KeyCode::Enter);
+    assert_eq!((f.pane.header_rows(), f.pane.view_pixel_size()), (0, (800, 480)));
+    send(&f, "location");
+    press(&f, KeyCode::Escape);
+    assert_eq!(f.pane.header_rows(), 0);
+}
+
+#[test]
+fn ctrl_l_edits_the_address_and_a_click_on_the_page_gives_it_up() {
+    let f = fixture_header();
+    f.engine.view.set_info("https://e.test/", "");
+    f.pane.key_down(KeyCode::Char('l'), KeyModifiers::CTRL).unwrap();
+    assert!(f.ctl_editing());
+    assert!(f.engine.view.st.lock().keys.is_empty());
+    f.pane.mouse_event(mouse(MouseEventKind::Press, MouseButton::Left, 10, 5, 0, 0)).unwrap();
+    assert!(!f.ctl_editing());
+}
+
+#[test]
+fn the_pointer_is_a_hand_over_buttons_and_a_text_cursor_over_the_field() {
+    let f = fixture_header();
+    f.engine.view.st.lock().cursor = Some("crosshair".into());
+    let at = |x: usize, y: i64| f.pane.mouse_event(mouse(MouseEventKind::Move, MouseButton::None, x, y, 0, 0)).unwrap();
+    at(30, 0);
+    assert_eq!(f.pane.mouse_pointer_shape().as_deref(), Some("text"));
+    at(7, 0);
+    assert_eq!(f.pane.mouse_pointer_shape().as_deref(), Some("pointer"));
+    at(30, 5);
+    assert_eq!(f.pane.mouse_pointer_shape().as_deref(), Some("crosshair"));
+    at(7, 0);
+    f.pane.mouse_leave();
+    assert_eq!(f.pane.mouse_pointer_shape().as_deref(), Some("crosshair"));
+}
+
+#[test]
+fn field_keys() {
+    let n = KeyModifiers::NONE;
+    let ctrl = KeyModifiers::CTRL;
+    assert_eq!(field_key(&KeyCode::Char('a'), n), FieldKey::Text("a".into()));
+    assert_eq!(field_key(&KeyCode::Char('A'), KeyModifiers::SHIFT), FieldKey::Text("A".into()));
+    assert_eq!(field_key(&KeyCode::Char('a'), ctrl), FieldKey::Edit(EditKey::Home));
+    assert_eq!(field_key(&KeyCode::Char('\u{1}'), ctrl), FieldKey::Edit(EditKey::Home));
+    assert_eq!(field_key(&KeyCode::Char('w'), ctrl), FieldKey::Edit(EditKey::DeleteWord));
+    assert_eq!(field_key(&KeyCode::Backspace, ctrl), FieldKey::Edit(EditKey::DeleteWord));
+    assert_eq!(field_key(&KeyCode::Char('v'), ctrl), FieldKey::Ignore);
+    assert_eq!(field_key(&KeyCode::Char('x'), KeyModifiers::ALT), FieldKey::Ignore);
+    assert_eq!(field_key(&KeyCode::Tab, n), FieldKey::Ignore);
+    assert_eq!(field_key(&KeyCode::Enter, n), FieldKey::Commit);
+    assert_eq!(field_key(&KeyCode::Escape, n), FieldKey::Cancel);
+}
+
+#[test]
+fn the_search_setting_defaults_to_google_and_is_validated() {
+    assert_eq!(search_from_settings(None).as_deref(), Some(DEFAULT_SEARCH));
+    assert_eq!(search_from_settings(Some("not json")).as_deref(), Some(DEFAULT_SEARCH));
+    assert_eq!(search_from_settings(Some(r#"{"web":{"links":"pane"}}"#)).as_deref(), Some(DEFAULT_SEARCH));
+    assert_eq!(search_from_settings(Some(r#"{"web":{"search":""}}"#)), None);
+    assert_eq!(search_from_settings(Some(r#"{"web":{"search":"ftp://x/%s"}}"#)), None);
+    assert_eq!(search_from_settings(Some(r#"{"web":{"search":"https://x/"}}"#)), None);
+    assert_eq!(
+        search_from_settings(Some(r#"{"web":{"search":"http://e.test/?q=%s"}}"#)).as_deref(),
+        Some("http://e.test/?q=%s")
+    );
+}
+
+impl Fixture {
+    fn ctl_editing(&self) -> bool {
+        self.pane.ctl.is_editing()
+    }
 }
