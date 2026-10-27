@@ -101,8 +101,11 @@ async fn show_notif_impl(notif: ToastNotification) -> Result<(), Box<dyn std::er
         return Ok(());
     }
 
+    // Critical notifications never expire on most servers (GNOME Shell, dunst, ...) and the
+    // expire timeout is ignored for them; only toasts without a timeout stay until dismissed.
+    let urgency: u8 = if notif.timeout.is_some() { 1 /* Normal */ } else { 2 /* Critical */ };
     let mut hints = HashMap::new();
-    hints.insert("urgency", Value::U8(2 /* Critical */));
+    hints.insert("urgency", Value::U8(urgency));
     let notification = proxy
         .notify(
             "wezterm",
