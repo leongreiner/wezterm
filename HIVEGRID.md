@@ -256,9 +256,13 @@ wezterm/wezterm.
     state is per pane and not persisted. The field completes from a per-profile address history
     (`mux/src/webpane/history.rs`: `profile-<name>.history.json` next to the browser profile; the
     view's `Info` events record the page's address once per change, without query and fragment;
-    none in a private pane): `Edit` holds the offer (`set_suggestion`, shown dim after the text with
-    the caret on its first character), Tab, Right and End take it, Enter opens its address, and
-    Backspace dismisses it. Pastes are never completed.
+    none in a private pane): `Edit` holds the candidates (`set_suggestions`; the first is shown dim after
+    the text with the caret on its first character, and with two or more they are listed in up to
+    five rows under the field: `Header::dropdown_rows` / `render_dropdown`, drawn by the
+    placeholder terminal like the header, so `Header::top_rows` is what the page gives up and
+    `WebPane::header_rows` what the texture starts below). Down/Up and hover pick one, a click or
+    Enter opens it, Tab, Right and End take the picked or inline one into the field, Backspace
+    dismisses the offers. Pastes are never completed.
   - What Hivegrid reads from it: the user var `hivegrid_web=1` (Lua: `pane:get_user_vars()`);
     in `wezterm cli list` a web pane has `is_web: true` (the field is new in codec 47; `false`
     for every other pane), `tty_name: null`, the page URL as `cwd` (any scheme but `file:`) and

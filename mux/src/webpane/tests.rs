@@ -1500,7 +1500,7 @@ fn while_typing_no_key_reaches_the_page_and_escape_gives_the_field_up() {
     let f = fixture_header();
     send(&f, "location");
     type_text(&f, "abc");
-    press(&f, KeyCode::UpArrow);
+    press(&f, KeyCode::PageUp);
     f.pane.key_up(KeyCode::Char('a'), KeyModifiers::NONE).unwrap();
     f.pane.send_paste("def").unwrap();
     f.pane.send_composed_text("é").unwrap();
@@ -1567,7 +1567,9 @@ fn field_keys() {
     assert_eq!(field_key(&KeyCode::Char('v'), ctrl), FieldKey::Ignore);
     assert_eq!(field_key(&KeyCode::Char('x'), KeyModifiers::ALT), FieldKey::Ignore);
     assert_eq!(field_key(&KeyCode::Tab, n), FieldKey::Edit(EditKey::Accept));
-    assert_eq!(field_key(&KeyCode::UpArrow, n), FieldKey::Ignore);
+    assert_eq!(field_key(&KeyCode::UpArrow, n), FieldKey::Edit(EditKey::Prev));
+    assert_eq!(field_key(&KeyCode::DownArrow, n), FieldKey::Edit(EditKey::Next));
+    assert_eq!(field_key(&KeyCode::PageUp, n), FieldKey::Ignore);
     assert_eq!(field_key(&KeyCode::Enter, n), FieldKey::Commit);
     assert_eq!(field_key(&KeyCode::Escape, n), FieldKey::Cancel);
 }
@@ -1602,6 +1604,10 @@ fn fixture_with_history() -> Fixture {
     f
 }
 
+fn navs(f: &Fixture) -> Vec<String> {
+    f.engine.view.calls().into_iter().filter(|c| c.starts_with("navigate")).collect()
+}
+
 fn locate(f: &Fixture) {
     send(f, "location");
     press(f, KeyCode::Backspace);
@@ -1628,7 +1634,7 @@ fn typing_te_offers_teams_and_tab_takes_it() {
     press(&f, KeyCode::Tab);
     assert_eq!(f.pane.ctl.header.lock().edit.as_ref().unwrap().text(), "teams.test");
     press(&f, KeyCode::Enter);
-    assert_eq!(f.engine.view.calls(), vec!["navigate https://teams.test"], "the accepted text is an address like any typed");
+    assert_eq!(navs(&f), vec!["navigate https://teams.test"], "the accepted text is an address like any typed");
 }
 
 #[test]
@@ -1637,13 +1643,13 @@ fn enter_on_an_offer_opens_it_and_backspace_gives_it_up() {
     locate(&f);
     type_text(&f, "te");
     press(&f, KeyCode::Enter);
-    assert_eq!(f.engine.view.calls(), vec!["navigate https://teams.test/"]);
+    assert_eq!(navs(&f), vec!["navigate https://teams.test/"]);
     locate(&f);
     type_text(&f, "te");
     press(&f, KeyCode::Backspace);
     assert!(!header_row(&f).contains("teams.test"), "{:?}", header_row(&f));
     with_settings(None, || press(&f, KeyCode::Enter));
-    assert_eq!(f.engine.view.calls()[1], "navigate https://www.google.com/search?q=t", "what is left is a search");
+    assert_eq!(navs(&f)[1], "navigate https://www.google.com/search?q=t", "what is left is a search");
 }
 
 #[test]
@@ -1668,4 +1674,82 @@ fn a_private_pane_remembers_and_offers_nothing() {
     engine.view.set_info("https://teams.test/", "");
     engine.emit(WebEvent::Info);
     assert!(pane.ctl.history.is_none());
+}
+
+fn rows_of(f: &Fixture) -> Vec<String> {
+    text_of(&f.pane)
+}
+
+#[test]
+fn several_candidates_are_listed_under_the_field_and_push_the_page_down() {
+    let f = fixture_with_history();
+    let full = f.pane.view_pixel_size();
+    locate(&f);
+    type_text(&f, "te");
+    let rows = rows_of(&f);
+    // teams.test, tesla.test, then the pages of teams.test.
+    assert_eq!(rows[1].trim(), "teams.test");
+    assert_eq!(rows[2].trim(), "tesla.test");
+    assert_eq!(rows[3].trim(), "teams.test/a");
+    assert_eq!(f.pane.header_rows(), 5, "the header and four candidates");
+    assert_eq!(f.pane.view_pixel_size().1, full.1 - 80, "the page gives the rows up");
+    // A single candidate has no list: the inline offer is all.
+    type_text(&f, "s");
+    assert_eq!(f.pane.header_rows(), 1, "tesla.test alone has no list");
+    assert!(header_row(&f).contains("la.test"));
+    // Leaving the field gives the rows back.
+    press(&f, KeyCode::Escape);
+    assert_eq!(f.pane.view_pixel_size(), full);
+}
+
+#[test]
+fn the_arrows_pick_a_candidate_and_enter_opens_it() {
+    let f = fixture_with_history();
+    locate(&f);
+    type_text(&f, "te");
+    press(&f, KeyCode::DownArrow);
+    assert!(header_row(&f).contains("tesla.test"), "the picked address stands in the field: {:?}", header_row(&f));
+    press(&f, KeyCode::DownArrow);
+    press(&f, KeyCode::UpArrow);
+    press(&f, KeyCode::UpArrow);
+    press(&f, KeyCode::UpArrow);
+    press(&f, KeyCode::DownArrow);
+    press(&f, KeyCode::Enter);
+    assert_eq!(navs(&f), vec!["navigate https://tesla.test/"]);
+    locate(&f);
+    type_text(&f, "te");
+    for _ in 0..20 {
+        press(&f, KeyCode::DownArrow);
+    }
+    press(&f, KeyCode::Tab);
+    assert_eq!(f.pane.ctl.header.lock().edit.as_ref().unwrap().text(), "teams.test/b", "the last candidate, not past it; Tab puts it in the field");
+}
+
+#[test]
+fn a_click_on_a_candidate_opens_it_and_hovering_picks_it() {
+    let f = fixture_with_history();
+    locate(&f);
+    type_text(&f, "te");
+    f.pane.mouse_event(mouse(MouseEventKind::Move, MouseButton::None, 20, 2, 0, 0)).unwrap();
+    assert_eq!(f.pane.ctl.header.lock().edit.as_ref().unwrap().selected(), 1);
+    f.pane.mouse_event(mouse(MouseEventKind::Press, MouseButton::Left, 20, 2, 0, 0)).unwrap();
+    assert_eq!(navs(&f), vec!["navigate https://tesla.test/"]);
+    assert_eq!(f.pane.header_rows(), 1, "the list is gone");
+    // A click below the list is the page's.
+    f.engine.view.st.lock().mouse.clear();
+    f.pane.mouse_event(mouse(MouseEventKind::Press, MouseButton::Left, 20, 5, 0, 0)).unwrap();
+    assert_eq!(f.engine.view.mouse().len(), 1);
+}
+
+#[test]
+fn the_list_never_takes_the_whole_pane() {
+    let f = fixture_header_sized(size(80, 4, 800, 80, 96));
+    for url in ["https://teams.test/a", "https://tesla.test/", "https://tea.test/", "https://ten.test/"] {
+        f.engine.view.set_info(url, "");
+        f.engine.emit(WebEvent::Info);
+    }
+    locate(&f);
+    type_text(&f, "te");
+    assert_eq!(f.pane.header_rows(), 3, "the header and two candidates leave one row of the four");
+    assert_eq!(f.pane.view_pixel_size().1, 20);
 }

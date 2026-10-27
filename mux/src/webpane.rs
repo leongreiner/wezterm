@@ -465,11 +465,11 @@ fn fit_columns(s: &str, cols: usize) -> String {
 struct Placeholder {
     term: Terminal,
     /// The header row and the lines below it as last written.
-    shown: Option<(Option<String>, Vec<String>)>,
+    shown: Option<(Vec<String>, Vec<String>)>,
 }
 
 impl Placeholder {
-    fn show(&mut self, header: Option<String>, lines: Vec<String>) {
+    fn show(&mut self, header: Vec<String>, lines: Vec<String>) {
         if let Some((h, l)) = &self.shown {
             if *h == header && *l == lines {
                 return;
@@ -482,9 +482,12 @@ impl Placeholder {
         // Rows used so far: a long line wraps onto several, and text past the last row would
         // scroll the first rows (the URL) away.
         let mut used = 0;
-        if let Some(header) = &header {
-            text.push_str(header);
-            used = 1;
+        for (i, row) in header.iter().take(rows).enumerate() {
+            if i > 0 {
+                text.push_str("\r\n");
+            }
+            text.push_str(row);
+            used = i + 1;
         }
         for (i, line) in lines.iter().enumerate() {
             if used >= rows {
@@ -626,10 +629,11 @@ impl HeaderCtl {
         self.placeholder.lock().term.get_size()
     }
 
-    /// Rows the header takes of the pane now: 0 or 1.
+    /// Rows at the top of the pane the page does not cover: the header row (0 or 1) and the
+    /// dropdown of the field.
     fn rows(&self) -> usize {
         let rows = self.pane_size().rows;
-        self.header.lock().rows(rows)
+        self.header.lock().top_rows(rows)
     }
 
     fn redraw(&self) {
@@ -642,9 +646,9 @@ impl HeaderCtl {
         let size = self.pane_size();
         let (result, before, after) = {
             let mut h = self.header.lock();
-            let before = h.rows(size.rows);
+            let before = h.top_rows(size.rows);
             let result = f(&mut h);
-            (result, before, h.rows(size.rows))
+            (result, before, h.top_rows(size.rows))
         };
         if before != after {
             self.placeholder.lock().shown = None;
@@ -705,17 +709,16 @@ impl HeaderCtl {
     /// Typed (`suggest`) or pasted text into the field. Typing at the end of the text offers the
     /// history's completion; a paste never does, so it cannot be redirected by one.
     fn edit_insert(&self, text: &str, suggest: bool) {
-        let offer = |typed: &str| {
-            let history = self.history.as_ref()?;
-            let c = history.lock().complete(typed, now_secs())?;
-            Some((c.suffix, c.url))
+        let offer = |typed: &str| match &self.history {
+            Some(history) => history.lock().suggest(typed, now_secs(), header::DROPDOWN_MAX),
+            None => vec![],
         };
         self.change(|h| {
             h.error = None;
             if let Some(e) = &mut h.edit {
                 e.insert(text);
-                let found = if suggest && e.at_end() { offer(&e.text()) } else { None };
-                e.set_suggestion(found);
+                let found = if suggest && e.at_end() { offer(&e.text()) } else { vec![] };
+                e.set_suggestions(found);
             }
         });
     }
@@ -872,7 +875,7 @@ impl WebPane {
         let view = engine.create_view(
             &spawn.url,
             &cfg,
-            view_size(&size, Header::new().rows(size.rows)),
+            view_size(&size, Header::new().top_rows(size.rows)),
             Box::new(move |event| events.handle(event)),
         )?;
         let _ = view_slot.set(Arc::downgrade(&view));
@@ -935,8 +938,8 @@ impl WebPane {
         (v.pixel_width, v.pixel_height)
     }
 
-    /// Rows at the top of the pane the page does not cover: 1 while the header row is shown,
-    /// else 0. The renderer starts the page texture below them.
+    /// Rows at the top of the pane the page does not cover: the header row while it is shown, and
+    /// the dropdown of candidates under the field. The renderer starts the page texture below.
     pub fn header_rows(&self) -> usize {
         self.ctl.rows()
     }
@@ -959,7 +962,13 @@ impl WebPane {
         let size = self.size();
         let header = {
             let h = self.ctl.header.lock();
-            (h.rows(size.rows) == 1).then(|| h.render(size.cols, &info))
+            if h.rows(size.rows) == 1 {
+                let mut rows = vec![h.render(size.cols, &info)];
+                rows.extend(h.render_dropdown(size.cols, size.rows));
+                rows
+            } else {
+                vec![]
+            }
         };
         let lines = placeholder_lines(&self.initial_url, &info, &self.view.state());
         let mut ph = self.placeholder.lock();
@@ -976,9 +985,9 @@ impl WebPane {
         let mods = hivegrid_web::keys::cdp_modifiers(event.modifiers);
         let header_rows = self.ctl.rows();
         let mut pointer = self.pointer.lock();
-        // The header row takes the pointer, unless a press that began in the page is still held
-        // (a drag may leave the page).
-        if header_rows == 1 && event.y == 0 && pointer.buttons == 0 {
+        // The header row and its dropdown take the pointer, unless a press that began in the page
+        // is still held (a drag may leave the page).
+        if (event.y as usize) < header_rows && event.y >= 0 && pointer.buttons == 0 {
             drop(pointer);
             self.header_mouse(&size, &event);
             return Ok(());
@@ -1080,8 +1089,36 @@ impl WebPane {
         Ok(())
     }
 
+    /// A pointer event on a candidate of the dropdown: hovering selects it, a click opens it.
+    fn dropdown_mouse(&self, event: &MouseEvent) {
+        let i = event.y as usize - 1;
+        match event.kind {
+            MouseEventKind::Move => {
+                self.ctl.set_hover(Hover { in_header: true, hit: None });
+                self.ctl.change(|h| {
+                    if let Some(e) = &mut h.edit {
+                        e.select(i);
+                    }
+                });
+            }
+            MouseEventKind::Press if matches!(event.button, MouseButton::Left) => {
+                self.ctl.change(|h| {
+                    if let Some(e) = &mut h.edit {
+                        e.select(i);
+                    }
+                });
+                self.ctl.commit();
+            }
+            _ => {}
+        }
+    }
+
     /// A pointer event on the header row.
     fn header_mouse(&self, size: &TerminalSize, event: &MouseEvent) {
+        if event.y > 0 {
+            self.dropdown_mouse(event);
+            return;
+        }
         let hit = layout(size.cols).hit(event.x);
         match event.kind {
             MouseEventKind::Move => self.ctl.set_hover(Hover { in_header: true, hit }),
@@ -1220,7 +1257,7 @@ impl Pane for WebPane {
             // Reflowed text: draw it again at the next read.
             ph.shown = None;
         }
-        self.view.resize(view_size(&size, self.ctl.header.lock().rows(size.rows)));
+        self.view.resize(view_size(&size, self.ctl.header.lock().top_rows(size.rows)));
         Ok(())
     }
 
@@ -1412,6 +1449,8 @@ fn field_key(key: &KeyCode, mods: KeyModifiers) -> FieldKey {
             }
         }
         KeyCode::Tab => FieldKey::Edit(EditKey::Accept),
+        KeyCode::DownArrow => FieldKey::Edit(EditKey::Next),
+        KeyCode::UpArrow => FieldKey::Edit(EditKey::Prev),
         _ => FieldKey::Ignore,
     }
 }

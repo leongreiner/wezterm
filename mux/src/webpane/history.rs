@@ -18,11 +18,15 @@ struct Entry {
     last: u64,
 }
 
-/// What typing offers: `suffix` goes after the typed text; `url` is where Enter on it goes.
+/// What typing offers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Completion {
+    /// The rest of the address after what was typed.
     pub suffix: String,
+    /// Where Enter on it goes.
     pub url: String,
+    /// The address as shown: no scheme, no `www.`.
+    pub display: String,
 }
 
 #[derive(Default)]
@@ -152,14 +156,21 @@ impl History {
         }
     }
 
-    /// What to offer after `typed`, if anything. Without a `/` the best site (by frecency, summed
-    /// over its pages) whose name starts with `typed`; with one the best page whose address does.
-    /// A scheme and `www.` at the start of `typed` are ignored, as in the address bar of a
-    /// browser. Nothing for empty text, text with blanks, or text that already is the whole
-    /// address.
+    /// What to offer after `typed`, if anything: the best candidate. See [`History::suggest`].
     pub fn complete(&self, typed: &str, now: u64) -> Option<Completion> {
-        if typed.is_empty() || typed.chars().any(char::is_whitespace) {
-            return None;
+        self.suggest(typed, now, 1).into_iter().next()
+    }
+
+    /// Up to `limit` candidates for `typed`, best first. Without a `/` in it: the sites (by
+    /// frecency, summed over their pages) whose name starts with it, then pages of such sites
+    /// (the root of a site stands for the site); with a `/`: the pages whose address starts with
+    /// it. A scheme and `www.` at the start of `typed` are ignored, as in the address bar of a
+    /// browser. Nothing for empty text, text with blanks, or text that already is the whole
+    /// address. Ties go to the shorter, then the alphabetically first address, so the answer is
+    /// the same every time.
+    pub fn suggest(&self, typed: &str, now: u64, limit: usize) -> Vec<Completion> {
+        if limit == 0 || typed.is_empty() || typed.chars().any(char::is_whitespace) {
+            return vec![];
         }
         let lower = typed.to_ascii_lowercase();
         let t = lower
@@ -168,53 +179,57 @@ impl History {
             .unwrap_or(&lower);
         let t = t.strip_prefix("www.").unwrap_or(t);
         if t.is_empty() {
-            return None;
+            return vec![];
         }
-        if t.contains('/') {
-            let mut best: Option<(f64, &Entry, String)> = None;
+        let order = |a: &(f64, String, String), b: &(f64, String, String)| {
+            b.0.total_cmp(&a.0)
+                .then(a.1.len().cmp(&b.1.len()))
+                .then(a.1.cmp(&b.1))
+        };
+        let mut out: Vec<(f64, String, String)> = Vec::new(); // (score, display, url)
+        if !t.contains('/') {
+            // Per site: the summed score and the origin to open.
+            let mut sites: HashMap<String, (f64, String)> = HashMap::new();
+            for e in &self.entries {
+                let Some((host, _)) = shown(&e.url) else { continue };
+                let Some((scheme, authority, _)) = parts(&e.url) else { continue };
+                let site = sites
+                    .entry(host)
+                    .or_insert_with(|| (0.0, format!("{scheme}://{authority}/")));
+                site.0 += e.score(now);
+            }
+            for (host, (score, origin)) in sites {
+                if host.len() > t.len() && host.to_ascii_lowercase().starts_with(t) {
+                    out.push((score, host, origin));
+                }
+            }
+            out.sort_by(order);
+            // Pages of a matching site come after every site: the way into a site is the site.
+            let mut pages: Vec<(f64, String, String)> = Vec::new();
+            for e in &self.entries {
+                let Some((host, full)) = shown(&e.url) else { continue };
+                if host.to_ascii_lowercase().starts_with(t) && full.len() > host.len() + 1 {
+                    pages.push((e.score(now), full, e.url.clone()));
+                }
+            }
+            pages.sort_by(order);
+            out.extend(pages);
+        } else {
             for e in &self.entries {
                 let Some((_, full)) = shown(&e.url) else { continue };
                 if full.len() > t.len() && full.to_ascii_lowercase().starts_with(t) {
-                    let s = e.score(now);
-                    if best.as_ref().map_or(true, |(b, be, bf)| {
-                        s > *b || (s == *b && (full.len(), &e.url) < (bf.len(), &be.url))
-                    }) {
-                        best = Some((s, e, full));
-                    }
+                    out.push((e.score(now), full, e.url.clone()));
                 }
             }
-            return best.and_then(|(_, e, full)| {
-                Some(Completion { suffix: full.get(t.len()..)?.to_string(), url: e.url.clone() })
-            });
+            out.sort_by(order);
         }
-        // Per site: the summed score, and the page that stands for it.
-        let mut sites: HashMap<String, (f64, f64, &Entry)> = HashMap::new();
-        for e in &self.entries {
-            let Some((host, _)) = shown(&e.url) else { continue };
-            let s = e.score(now);
-            let site = sites.entry(host).or_insert((0.0, f64::MIN, e));
-            site.0 += s;
-            if s > site.1 {
-                site.1 = s;
-                site.2 = e;
-            }
-        }
-        let mut best: Option<(&String, f64, &Entry)> = None;
-        for (host, (total, _, rep)) in &sites {
-            if host.len() > t.len() && host.to_ascii_lowercase().starts_with(t) {
-                if best.as_ref().map_or(true, |(bh, bs, _)| {
-                    *total > *bs || (*total == *bs && (host.len(), host) < (bh.len(), *bh))
-                }) {
-                    best = Some((host, *total, rep));
-                }
-            }
-        }
-        let (host, _, rep) = best?;
-        let (scheme, authority, _) = parts(&rep.url)?;
-        Some(Completion {
-            suffix: host.get(t.len()..)?.to_string(),
-            url: format!("{scheme}://{authority}/"),
-        })
+        out.into_iter()
+            .take(limit)
+            .filter_map(|(_, display, url)| {
+                let suffix = display.get(t.len()..)?.to_string();
+                Some(Completion { suffix, url, display })
+            })
+            .collect()
     }
 }
 
@@ -253,7 +268,8 @@ mod tests {
         let h = hist(&[("https://teams.microsoft.com/v2/?x=1", 5, 0), ("https://tesla.com/", 1, 0)]);
         assert_eq!(c(&h, "te"), Some(("ams.microsoft.com".into(), "https://teams.microsoft.com/".into())));
         assert_eq!(c(&h, "tes"), Some(("la.com".into(), "https://tesla.com/".into())));
-        assert_eq!(c(&h, "teams.microsoft.com"), None, "nothing left to offer");
+        assert_eq!(c(&h, "teams.microsoft.com"), Some(("/v2/".into(), "https://teams.microsoft.com/v2/".into())), "a whole site name offers its page, as a browser does");
+        assert_eq!(c(&h, "teams.microsoft.com/v2/"), None, "nothing left to offer");
         assert_eq!(c(&h, "x"), None);
         assert_eq!(c(&h, ""), None);
         assert_eq!(c(&h, "te st"), None);
@@ -289,6 +305,29 @@ mod tests {
         assert_eq!(c(&h, "github.com/rust-lang/c"), Some(("argo".into(), "https://github.com/rust-lang/cargo".into())));
         assert_eq!(c(&h, "github.com/rust-lang/rust"), None);
         assert_eq!(c(&h, "gi").unwrap().0, "thub.com");
+    }
+
+    #[test]
+    fn several_candidates_come_best_first_sites_before_pages() {
+        let h = hist(&[
+            ("https://teams.test/", 4, 0),
+            ("https://teams.test/chat/1", 2, 0),
+            ("https://tesla.test/", 3, 0),
+            ("https://tea.test/", 1, 0),
+            ("https://other.test/", 9, 0),
+        ]);
+        let s = h.suggest("te", NOW, 5);
+        let shown: Vec<&str> = s.iter().map(|c| c.display.as_str()).collect();
+        // teams (6 visits) > tesla (3) > tea (1), then the page of teams.
+        assert_eq!(shown, ["teams.test", "tesla.test", "tea.test", "teams.test/chat/1"]);
+        assert_eq!(s[0].suffix, "ams.test");
+        assert_eq!(s[0].url, "https://teams.test/");
+        assert_eq!(s[3].url, "https://teams.test/chat/1");
+        assert_eq!(h.suggest("te", NOW, 2).len(), 2);
+        assert!(h.suggest("te", NOW, 0).is_empty());
+        assert_eq!(h.complete("te", NOW).unwrap(), s[0], "the inline offer is the first candidate");
+        let paths = h.suggest("teams.test/", NOW, 5);
+        assert_eq!(paths.iter().map(|c| c.display.as_str()).collect::<Vec<_>>(), ["teams.test/chat/1"]);
     }
 
     #[test]

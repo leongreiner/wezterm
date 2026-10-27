@@ -3,6 +3,7 @@
 //! row lower, see `render/web.rs`). Everything here is pure: state, hit testing, line editing and
 //! the escape text of the row; `WebPane` wires it to the view.
 
+use super::history::Completion;
 use hivegrid_web::PageInfo;
 use std::ops::Range;
 use wezterm_term::unicode_column_width;
@@ -93,7 +94,13 @@ pub enum EditKey {
     SelectAll,
     /// Take the offered completion (Tab).
     Accept,
+    /// Select the next / previous candidate of the dropdown.
+    Next,
+    Prev,
 }
+
+/// Rows of candidates the dropdown shows at most.
+pub const DROPDOWN_MAX: usize = 5;
 
 /// The address field while it is being typed in.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,8 +109,11 @@ pub struct Edit {
     cursor: usize,
     /// The whole text is selected: the next character replaces it.
     all: bool,
-    /// What history offers after the text: (the rest of the address, the address to open).
-    suggestion: Option<(String, String)>,
+    /// What history offers for the text, best first. The first one is shown inline after the
+    /// text; with more than one they are also listed below the field.
+    list: Vec<Completion>,
+    /// The candidate Enter and Tab act on: 0 is the inline one, more is picked with the arrows.
+    sel: usize,
 }
 
 fn char_width(c: char) -> usize {
@@ -117,7 +127,7 @@ fn width_of(chars: &[char]) -> usize {
 impl Edit {
     pub fn new(text: &str) -> Self {
         let text: Vec<char> = text.chars().filter(|c| !c.is_control()).collect();
-        Self { cursor: text.len(), all: !text.is_empty(), text, suggestion: None }
+        Self { cursor: text.len(), all: !text.is_empty(), text, list: vec![], sel: 0 }
     }
 
     /// The caret is after the last character and nothing is selected: the only place a completion
@@ -126,13 +136,40 @@ impl Edit {
         !self.all && self.cursor == self.text.len()
     }
 
-    pub fn set_suggestion(&mut self, s: Option<(String, String)>) {
-        self.suggestion = s.filter(|_| self.at_end());
+    /// The candidates for the text now in the field (none unless the caret is at its end).
+    pub fn set_suggestions(&mut self, list: Vec<Completion>) {
+        self.list = if self.at_end() { list } else { vec![] };
+        self.sel = 0;
     }
 
-    /// The address a completion on offer opens.
+    /// The address Enter opens instead of the text: that of the selected candidate.
     pub fn suggested_url(&self) -> Option<&str> {
-        self.suggestion.as_ref().map(|(_, url)| url.as_str())
+        self.list.get(self.sel).map(|c| c.url.as_str())
+    }
+
+    /// The candidates the dropdown lists (only when there is more than the inline one).
+    pub fn dropdown(&self) -> &[Completion] {
+        if self.list.len() >= 2 {
+            &self.list[..self.list.len().min(DROPDOWN_MAX)]
+        } else {
+            &[]
+        }
+    }
+
+    pub fn selected(&self) -> usize {
+        self.sel
+    }
+
+    /// Select candidate `i` of the dropdown (a hover); out of range is ignored.
+    pub fn select(&mut self, i: usize) {
+        if i < self.dropdown().len() {
+            self.sel = i;
+        }
+    }
+
+    /// The candidate's address that stands in the field while it is selected with the arrows.
+    fn preview(&self) -> Option<&str> {
+        (self.sel > 0).then(|| self.list.get(self.sel)).flatten().map(|c| c.display.as_str())
     }
 
     pub fn text(&self) -> String {
@@ -153,7 +190,8 @@ impl Edit {
         if clean.is_empty() {
             return;
         }
-        self.suggestion = None;
+        self.list.clear();
+        self.sel = 0;
         if self.all {
             self.text.clear();
             self.cursor = 0;
@@ -166,17 +204,33 @@ impl Edit {
 
     pub fn key(&mut self, key: EditKey) {
         let all = std::mem::replace(&mut self.all, false);
-        // Any key but the ones that take it drops the offer (Backspace gives it up, as in a
-        // browser's address bar).
-        if let Some((rest, _)) = self.suggestion.take() {
-            if self.cursor == self.text.len() && !all && matches!(key, EditKey::Accept | EditKey::Right | EditKey::End) {
-                self.text.extend(rest.chars());
-                self.cursor = self.text.len();
+        // Any key but the ones that take or move through the offers drops them (Backspace gives
+        // them up, as in a browser's address bar).
+        let (list, sel) = (std::mem::take(&mut self.list), std::mem::take(&mut self.sel));
+        match key {
+            EditKey::Next | EditKey::Prev if list.len() >= 2 && !all => {
+                let last = list.len().min(DROPDOWN_MAX) - 1;
+                self.sel = if key == EditKey::Next { (sel + 1).min(last) } else { sel.saturating_sub(1) };
+                self.list = list;
                 return;
             }
+            EditKey::Accept | EditKey::Right | EditKey::End if !all && !list.is_empty() => {
+                if sel > 0 {
+                    // A candidate picked with the arrows replaces the text.
+                    self.text = list[sel].display.chars().collect();
+                    self.cursor = self.text.len();
+                    return;
+                }
+                if self.cursor == self.text.len() && !list[0].suffix.is_empty() {
+                    self.text.extend(list[0].suffix.chars());
+                    self.cursor = self.text.len();
+                    return;
+                }
+            }
+            _ => {}
         }
         match key {
-            EditKey::Accept => {}
+            EditKey::Accept | EditKey::Next | EditKey::Prev => {}
             EditKey::SelectAll => self.all = !self.text.is_empty(),
             _ if all && matches!(key, EditKey::Backspace | EditKey::Delete | EditKey::DeleteWord | EditKey::KillToStart | EditKey::KillToEnd) => {
                 self.text.clear();
@@ -272,6 +326,40 @@ impl Header {
         usize::from((self.shown || self.edit.is_some()) && pane_rows >= MIN_PANE_ROWS)
     }
 
+    /// Rows at the top of the pane the page does not cover: the header row and the dropdown.
+    pub fn top_rows(&self, pane_rows: usize) -> usize {
+        self.rows(pane_rows) + self.dropdown_rows(pane_rows)
+    }
+
+    /// Rows of the dropdown below the header: the candidates of the field being typed in, when
+    /// there is more than the inline one, as many as leave a row of the page.
+    pub fn dropdown_rows(&self, pane_rows: usize) -> usize {
+        match &self.edit {
+            Some(e) if self.error.is_none() && self.rows(pane_rows) == 1 => {
+                e.dropdown().len().min(pane_rows.saturating_sub(MIN_PANE_ROWS - 1))
+            }
+            _ => 0,
+        }
+    }
+
+    /// The dropdown rows as escape text, each exactly `cols` wide: under the field, the selected
+    /// candidate in reverse video.
+    pub fn render_dropdown(&self, cols: usize, pane_rows: usize) -> Vec<String> {
+        let n = self.dropdown_rows(pane_rows);
+        let Some(edit) = &self.edit else { return vec![] };
+        let lay = layout(cols);
+        (0..n)
+            .map(|i| {
+                let mut row = Row::new(cols);
+                row.pad("", lay.field.start);
+                let style = if i == edit.selected() { "100;7" } else { "100" };
+                let width = lay.field.len();
+                row.put(width, style, &format!(" {}", fit_plain(&edit.dropdown()[i].display, width.saturating_sub(2))));
+                row.finish()
+            })
+            .collect()
+    }
+
     /// The row as escape text for a terminal `cols` wide (home position, no line break): one
     /// SGR run per part, exactly `cols` columns.
     pub fn render(&self, cols: usize, info: &PageInfo) -> String {
@@ -298,6 +386,15 @@ impl Header {
                 row.put(room, "100;31", &fit(error, room));
             }
             (Some(edit), None) => {
+                if let Some(shown) = edit.preview() {
+                    // An arrow-selected candidate stands in the field.
+                    row.put(room, "100;7", &fit_plain(shown, room));
+                    row.put(pad, FIELD, &" ".repeat(pad));
+                    if let Some(range) = &lay.collapse {
+                        row.put(range.len(), if self.hover.hit == Some(Hit::Collapse) { "1;7" } else { "" }, " ▴ ");
+                    }
+                    return row.finish();
+                }
                 let (before, at, after) = edit.window(room);
                 if edit.all {
                     let shown = format!("{before}{}{after}", at.map(String::from).unwrap_or_default());
@@ -306,10 +403,8 @@ impl Header {
                     let start = row.used;
                     row.push(FIELD, &before);
                     // A completion on offer: its first character carries the caret.
-                    let ghost = match (&edit.suggestion, at, after.is_empty()) {
-                        (Some((rest, _)), None, true) => {
-                            fit_plain(rest, room.saturating_sub(row.used - start))
-                        }
+                    let ghost = match (edit.list.first(), at, after.is_empty()) {
+                        (Some(c), None, true) => fit_plain(&c.suffix, room.saturating_sub(row.used - start)),
                         _ => String::new(),
                     };
                     if ghost.is_empty() {
