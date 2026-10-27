@@ -26,7 +26,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install cargo-cooldown
-        uses: baptiste0928/cargo-install@v3.4.0
+        uses: baptiste0928/cargo-install@v3
         with:
           crate: cargo-cooldown
 
