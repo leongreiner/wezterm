@@ -103,6 +103,133 @@ wezterm/wezterm.
   pane was briefly full width were painted over the neighbouring panes.
 - The floating "+" button's rounded corners take its fill colour (they were notched in the
   default border colour), and it sits 0.75 cell from the last tab.
+- Web pane (`mux/src/webpane.rs`, `hivegrid-web/`, `wezterm-gui/src/termwindow/render/web.rs`): a
+  pane kind that shows a web page. The page lives in an out-of-process headless Chrome
+  (`chrome --headless=new --remote-debugging-pipe`, DevTools protocol on fds 3/4, no TCP port;
+  one browser process per profile name, one page per pane, sandbox on, the browser dies with the
+  GUI). Frames come from `Page.startScreencast` (JPEG), are decoded in Rust and drawn as one
+  textured quad in the pane's rectangle after the zindex-0 layer; a pane with no frame yet, or
+  whose browser exited, draws its placeholder text grid (URL and title cut to one row each, then
+  the state; `Press Enter to restart the browser.` after a crash, followed by the reason and the
+  last lines Chrome printed). `WebPane` is an ordinary `mux::Pane`: no new PDU, no `PaneEntry`
+  change, no Lua API; split, zoom (chrome-aware), rotate, swap, `--move-pane-id` and `cli list`
+  work on it as on any pane. Mouse (always grabbed, so no cell rounding; a wheel notch is meant to
+  scroll 100 CSS px, see below), keys, paste and composed text go to the page; Hivegrid's own key bindings
+  still run first. Ctrl+C and Ctrl+Insert also ask the page for its selection and put it on the
+  clipboard (`MuxNotification::AssignClipboard`); hyperlink rules never apply to the placeholder; Enter in a pane whose browser exited restarts
+  it; closing the pane closes the page, and Chrome exits with the last page of its profile.
+  - Spawning: the program name `hivegrid:web <url>` (`about:blank` without a URL) handled first
+    in `LocalDomain::spawn_pane`. The profile (default `main`) and privacy come from variables
+    set on the spawn command itself, `HIVEGRID_WEB_PROFILE=<name>` and `HIVEGRID_WEB_PRIVATE=1`
+    (the GUI's own environment does not count), which Lua's `pane:split{ args = { 'hivegrid:web',
+    url }, set_environment_variables = { ... } }` and `SpawnCommandInNewTab` forward (checked in
+    the GUI for `pane:split`). `HIVEGRID_WEB_FLAGS` (read when a pane spawns) adds Chrome flags,
+    e.g. `--no-sandbox` where Chrome cannot create its sandbox (unsafe). CLI sugar: `wezterm cli
+    split-pane --url URL [--profile NAME] [--private]` and `wezterm cli spawn --url URL ...`;
+    `--url` conflicts with `PROG`, `--cwd` and `--move-pane-id`, and both build the command with
+    `mux::webpane::spawn_command`. Stock WezTerm would try to run a program called `hivegrid:web`,
+    so the config only uses it when `theme.has_web` is true (the build is recognised by the same
+    probe as the Click format item, see Deploy). Unsupported: `wezterm-mux-server` and `wezterm
+    cli` never call `mux::webpane::enable` (spawning there fails with "web panes need the
+    Hivegrid GUI"), mux client domains and SSH domains refuse the sentinel ("web panes are only
+    supported in the local domain"). Profiles live in
+    `${XDG_DATA_HOME:-~/.local/share}/hivegrid/web/profile-<name>` (a relative `XDG_DATA_HOME` is
+    ignored; mode 0700, cookies and logins persist); a private pane gets an ephemeral browser
+    context. The directory name is injective (letters, digits, `-`, `_`, `.` stay, every other
+    byte becomes `%XX`), so `a/b` and `a_b` never share a directory, and browsers are keyed by it.
+    Other knobs: `HIVEGRID_CHROME` (binary), `HIVEGRID_WEB_QUALITY`, `HIVEGRID_WEB_SCALE`,
+    `HIVEGRID_WEB_DEVTOOLS` (see Security below, and `hivegrid-web/src/lib.rs`).
+  - Security notes for the web pane:
+    - Cookies and logins sit in the profile directory under Chrome's *basic* password store
+      (`--password-store=basic`): they are obfuscated with a key built into Chrome, not encrypted
+      by the OS keyring, so anything running as your user can read them. The directories are 0700
+      and the files stay private to the user; use a `--private` pane for a login you do not want
+      on disk.
+    - `HIVEGRID_WEB_DEVTOOLS=1` is opt-in and starts Chrome with `--remote-debugging-port=0`: an
+      unauthenticated DevTools port on 127.0.0.1 that any local process can use to control the
+      browser and read its cookies. A warning is logged each time a browser is started with it.
+      Leave it unset except while debugging.
+    - Chrome is started with a cleared environment plus an allowlist (`HOME`, `PATH`, `XDG_*`,
+      `LANG`, `LC_*`, `TZ`, `DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`, `DBUS_SESSION_BUS_ADDRESS`,
+      the proxy variables in lower and upper case, `HIVEGRID_WEB_*`); tokens and `WEZTERM_*` of
+      the GUI process do not reach the browser or its renderers.
+    - A typed, spawned (`--url`, `hivegrid:web`) or `navigate;` location is opened only for the
+      schemes `http`, `https`, `file`, `data` and exactly `about:blank`; `javascript:`, `chrome:`,
+      `devtools:`, `about:flags`, `view-source:` and the like are refused (a spawn falls back to
+      `about:blank`, a navigation is ignored). The Lua and Python normalisers apply the same list.
+    - Page-controlled text is cleaned where it enters (`hivegrid_web::sanitize_display`): the title
+      and the URL shown lose control characters (`char::is_control`, U+2028/2029, bidi controls) and
+      are cut to 512 and 2048 characters; a JS dialog's text is cleaned before it is logged. CDP
+      messages above 32 MiB are dropped without being stored (the connection stays up), at most 64
+      mouse-move commands wait in the writer queue, and a decoded frame may not exceed a few
+      times the view's pixel area.
+    - A panic in a view's worker or decoder thread, or a texture that cannot be allocated, leaves
+      the pane's placeholder instead of a frozen page or an aborted paint.
+  - Wheel: the backends count differently, so `mux::webpane::set_wheel_units` (called from
+    `GuiFrontEnd::try_new`) says how: X11 sends 5 "lines" per notch (x 20 CSS px = 100 px), Wayland
+    the pointer axis value times the window scale, i.e. device pixels (about 10 per notch of a
+    wheel [not observed here], x 10 / scale CSS px). Chrome scrolls a CDP wheel delta 1:1. On
+    Wayland a touchpad, whose amounts are finger movement, scrolls proportionally fast: the window
+    layer does not tell it from a wheel.
+  - Scale: Chrome's screencast frames are CSS-sized unless the browser itself runs at the view's
+    scale, so a browser is launched with `--force-device-scale-factor` of the first view that needs
+    it (a flag of your own in `HIVEGRID_WEB_FLAGS` wins) and expects frames of that size. A view of
+    another scale (a second monitor) in the same browser still gets a frame: smaller than its
+    pixels when its scale (times zoom) is above the browser's, which the renderer stretches. A frame
+    of an unexpected size is never left unshown: it appears once the size had 500 ms to settle.
+    Mouse positions are divided by the page zoom (`zoom;N` of the control channel).
+  - Exit: the GUI calls `mux::webpane::shutdown` after `Mux::shutdown`, which sends every browser
+    `Browser.close` and waits up to 3 s, so cookies and logins reach the profile; a browser that
+    does not quit is killed, and `PR_SET_PDEATHSIG` still kills it if the GUI dies (kill -9).
+  - Page policy (`hivegrid-web`): permissions and downloads are denied, `alert` is accepted,
+    `confirm` and `prompt` are dismissed, and `window.open`/`target=_blank` load their URL in the
+    same pane instead of opening a window, but only `http(s)` URLs (a script cannot steer the pane to
+    `data:`, `file:` or `javascript:`). The cursor a page reports is limited to the CSS cursor
+    keywords, and a view's events reach the GUI as at most one queued redraw per pane.
+  - Control channel: `ESC _ hgweb ; <command> [; <arg>] ESC \` written to the pane (Lua
+    `pane:send_text`, `wezterm cli send-text --no-paste`): `navigate;URL`, `back`, `forward`,
+    `reload`, `hardreload`, `stop`, `restart`, `copy-url`, `zoom;PERCENT`, `devtools` (only with
+    `HIVEGRID_WEB_DEVTOOLS=1`). Output of a program in a terminal pane never reaches it: the
+    sequence has to be written to the web pane itself.
+  - What Hivegrid reads from it: the user var `hivegrid_web=1` (Lua: `pane:get_user_vars()`);
+    in `wezterm cli list` a web pane has `is_web: true` (the field is new in codec 47; `false`
+    for every other pane), `tty_name: null`, the page URL as `cwd` (any scheme but `file:`) and
+    the page title (the URL until there is one) as `title`. `Mux::resolve_cwd` ignores
+    the working directory of a web pane, so a split of a terminal never starts in a page's path. The web pane is a grid pane (not `hivegrid_chrome`, not fixed
+    width): numbered, arranged and zoomed with the terminals.
+  - Drawing (`render/web.rs`): `paint_pane` hands a web pane that has a frame to
+    `TermWindow::paint_web_pane` and skips its cells; the frame goes into a per-pane texture
+    (`RenderContext::allocate_texture`, reallocated when the frame size changes, uploaded when
+    the frame changed) kept in `RenderState::web` so it dies with the GL/wgpu context. After the
+    zindex-0 layer, `call_draw_glium` and `call_draw_webgpu` draw it with the glyph program's
+    background-image mode (`has_color = 2.0`, no new shader), so the fancy tab bar and modals
+    still cover it, then a 2 px border in the pane palette's `cursor_bg` over the edge of the
+    active web pane. Panes painted in a pass are visible; the ones painted in the previous pass
+    and not in this one (another tab, an overlay) get `set_visible(false)`, which stops the
+    screencast and hides the page (no rendering, no animation frames) until it is painted again,
+    and their textures are freed. Not applied to web panes: `inactive_pane_hsb`.
+  - Hook points in shared code, for rebases: `mux/src/domain.rs` (`LocalDomain::spawn_pane`, the
+    first four lines), `mux/src/lib.rs` (`pub mod webpane`, the web pane filter in `resolve_cwd`),
+    `mux/src/ssh.rs` (`RemoteSshDomain::spawn_pane`) and `wezterm-client/src/domain.rs`
+    (`ClientDomain::spawn` and `split_pane`), two lines each for the refusals,
+    `wezterm-gui/src/main.rs` (`setup_mux`: `mux::webpane::enable`; `main`: `mux::webpane::shutdown`),
+    `wezterm-gui/src/frontend.rs` (`try_new`: `set_wheel_units`),
+    `wezterm-gui/src/renderstate.rs` (`allocate_texture`, which `allocate_texture_atlas` now
+    calls; `RenderLayer::zindex` is `pub`; the `web` field of `RenderState`),
+    `termwindow/render/paint.rs` (`paint_pass`: `web.begin_pass()` and `web_end_pass()`),
+    `render/pane.rs` (`paint_pane`: one early return after the background), `render/draw.rs` (one
+    call after the zindex-0 layer in each of `call_draw_glium` and `call_draw_webgpu`),
+    `render/mod.rs` (`pub mod web`), and the CLI `wezterm/src/cli/{split_pane,spawn_command}.rs`.
+    Everything else is new files. The renderer hooks (`render/draw.rs` above all) are the
+    likeliest conflicts.
+  - Tests: `cargo test -p hivegrid-web -p mux` plus `cargo test -p wezterm -p wezterm-gui -- web
+    split_pane spawn_command` with the environment `build-hivegrid.sh` sets (`dev/check` runs no
+    cargo, so these run locally). `dev/qa/web-smoke` (local only: Xvfb, Chrome, a test
+    build as `HG_WEZTERM_DIR`) drives the real GUI in the QA sandbox and checks pixels, input,
+    zoom/resize/move/arrange, dialogs, crash and restart, freezing of hidden tabs, clipboard and
+    that no Chrome outlives a pane or the GUI; `HGQ_FRONT_END=WebGpu` runs it through wgpu and `HGQ_XFT_DPI=144` at a scale of 1.5.
+    Hivegrid's side of the contract (`config/web.lua`, `bin/hivegrid_agents.py`) is tested in the
+    main repository (`tests/lua/test_web.lua`, `tests/test_agents_web.py`).
 
 ## Build without sudo
 

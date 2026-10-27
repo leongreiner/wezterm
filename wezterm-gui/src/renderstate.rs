@@ -69,6 +69,15 @@ impl RenderContext {
     }
 
     pub fn allocate_texture_atlas(&self, size: usize) -> anyhow::Result<Rc<dyn Texture2d>> {
+        self.allocate_texture(size, size)
+    }
+
+    /// A texture of any size (the atlas is the square case).
+    pub fn allocate_texture(
+        &self,
+        width: usize,
+        height: usize,
+    ) -> anyhow::Result<Rc<dyn Texture2d>> {
         match self {
             Self::Glium(context) => {
                 let caps = context.get_capabilities();
@@ -80,6 +89,7 @@ impl RenderContext {
                     .max_texture_size
                     .try_into()
                     .context("represent Capabilities.max_texture_size as usize")?;
+                let size = width.max(height);
                 if size > max_texture_size {
                     anyhow::bail!(
                         "Cannot use a texture of size {} as it is larger \
@@ -93,14 +103,14 @@ impl RenderContext {
                     context,
                     glium::texture::SrgbFormat::U8U8U8U8,
                     glium::texture::MipmapsOption::NoMipmap,
-                    size as u32,
-                    size as u32,
+                    width as u32,
+                    height as u32,
                 )?);
                 Ok(surface)
             }
             Self::WebGpu(state) => {
                 let texture: Rc<dyn Texture2d> =
-                    Rc::new(WebGpuTexture::new(size as u32, size as u32, state)?);
+                    Rc::new(WebGpuTexture::new(width as u32, height as u32, state)?);
                 Ok(texture)
             }
         }
@@ -454,7 +464,7 @@ impl TripleVertexBuffer {
 pub struct RenderLayer {
     pub vb: RefCell<[TripleVertexBuffer; 3]>,
     context: RenderContext,
-    zindex: i8,
+    pub zindex: i8,
 }
 
 impl RenderLayer {
@@ -576,6 +586,8 @@ pub struct RenderState {
     pub util_sprites: UtilSprites,
     pub glyph_prog: Option<glium::Program>,
     pub layers: RefCell<Vec<Rc<RenderLayer>>>,
+    /// Page textures and draw queue of the web panes (Hivegrid fork).
+    pub web: crate::termwindow::render::web::WebRenderState,
 }
 
 impl RenderState {
@@ -605,6 +617,7 @@ impl RenderState {
                         util_sprites,
                         glyph_prog,
                         layers: RefCell::new(vec![main_layer]),
+                        web: Default::default(),
                     });
                 }
                 Err(OutOfTextureSpace {

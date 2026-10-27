@@ -226,6 +226,21 @@ impl crate::TermWindow {
             }
         }
 
+        // Hivegrid: a web pane with a frame is a texture drawn after layer 0 (render/web.rs);
+        // one without (starting, crashed) falls through to its placeholder text.
+        if self.paint_web_pane(
+            pos,
+            &super::web::PaneMetrics {
+                cell_width,
+                cell_height,
+                padding_left,
+                border_left: border.left.get() as f32,
+                top_pixel_y,
+            },
+        )? {
+            return Ok(());
+        }
+
         // TODO: we only have a single scrollbar in a single position.
         // We only update it for the active pane, but we should probably
         // do a per-pane scrollbar.  That will require more extensive

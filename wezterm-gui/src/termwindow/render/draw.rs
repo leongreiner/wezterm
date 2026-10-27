@@ -140,6 +140,30 @@ impl crate::TermWindow {
 
                 vb.next_index();
             }
+
+            // Hivegrid: web panes go over everything of layer 0 and under the higher layers.
+            if layer.zindex == 0 {
+                super::web::draw_webgpu(
+                    webgpu,
+                    render_state,
+                    &mut encoder,
+                    &view,
+                    &mut cleared,
+                    &super::web::DrawEnv {
+                        window_size: (
+                            self.dimensions.pixel_width as f32,
+                            self.dimensions.pixel_height as f32,
+                        ),
+                        projection: &projection,
+                        foreground_text_hsb: (
+                            foreground_text_hsb[0],
+                            foreground_text_hsb[1],
+                            foreground_text_hsb[2],
+                        ),
+                        milliseconds,
+                    },
+                )?;
+            }
         }
 
         // submit will accept anything that implements IntoIter
@@ -266,8 +290,25 @@ impl crate::TermWindow {
                         },
                     )?;
                 }
-
                 vb.next_index();
+            }
+
+            // Hivegrid: web panes go over everything of layer 0 and under the higher layers.
+            if layer.zindex == 0 {
+                super::web::draw_glium(
+                    gl_state,
+                    frame,
+                    &super::web::DrawEnv {
+                        window_size: (
+                            self.dimensions.pixel_width as f32,
+                            self.dimensions.pixel_height as f32,
+                        ),
+                        projection: &projection,
+                        foreground_text_hsb,
+                        milliseconds,
+                    },
+                    [&cursor_blink, &blink, &rapid_blink],
+                )?;
             }
         }
 

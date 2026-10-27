@@ -681,6 +681,8 @@ fn setup_mux(
 ) -> anyhow::Result<Arc<Mux>> {
     let mux = Arc::new(mux::Mux::new(Some(local_domain.clone())));
     Mux::set_mux(&mux);
+    // Hivegrid: only the GUI hosts web panes (the mux server never enables an engine).
+    mux::webpane::enable(Arc::new(hivegrid_web::CdpEngine::new()));
     let client_id = Arc::new(mux::client::ClientId::new());
     mux.register_client(client_id.clone());
     mux.replace_identity(Some(client_id));
@@ -837,6 +839,9 @@ fn main() {
         terminate_with_error(e);
     }
     Mux::shutdown();
+    // Hivegrid: browsers of web panes quit orderly (cookies reach disk); Chrome would otherwise
+    // be killed with this process.
+    mux::webpane::shutdown(std::time::Duration::from_secs(3));
     frontend::shutdown();
 }
 

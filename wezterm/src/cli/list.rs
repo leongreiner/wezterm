@@ -139,6 +139,8 @@ struct CliListResultItem {
     is_active: bool,
     is_zoomed: bool,
     tty_name: Option<String>,
+    /// Hivegrid: a web pane (headless Chrome), not a terminal.
+    is_web: bool,
 }
 
 impl CliListResultItem {
@@ -157,6 +159,7 @@ impl CliListResultItem {
             is_active_pane,
             is_zoomed_pane,
             tty_name,
+            is_web,
             size:
                 TerminalSize {
                     rows,
@@ -197,6 +200,7 @@ impl CliListResultItem {
             is_active: is_active_pane,
             is_zoomed: is_zoomed_pane,
             tty_name,
+            is_web,
         }
     }
 }

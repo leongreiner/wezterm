@@ -821,6 +821,8 @@ impl Domain for ClientDomain {
         command_dir: Option<String>,
         window: WindowId,
     ) -> anyhow::Result<Arc<Tab>> {
+        // Hivegrid: the remote would run the web pane sentinel as a program.
+        mux::webpane::refuse_in_remote_domain(command.as_ref())?;
         let inner = self
             .inner()
             .ok_or_else(|| anyhow!("domain is not attached"))?;
@@ -890,6 +892,8 @@ impl Domain for ClientDomain {
             } => (command, command_dir, None),
             SplitSource::MovePane(move_pane_id) => (None, None, Some(move_pane_id)),
         };
+        // Hivegrid: the remote would run the web pane sentinel as a program.
+        mux::webpane::refuse_in_remote_domain(command.as_ref())?;
 
         let result = inner
             .client

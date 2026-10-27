@@ -164,6 +164,7 @@ impl crate::TermWindow {
     pub fn paint_pass(&mut self) -> anyhow::Result<()> {
         {
             let gl_state = self.render_state.as_ref().unwrap();
+            gl_state.web.begin_pass();
             for layer in gl_state.layers.borrow().iter() {
                 layer.clear_quad_allocation();
             }
@@ -276,6 +277,7 @@ impl crate::TermWindow {
             .context("paint_window_borders")?;
         drop(layers);
         self.paint_modal().context("paint_modal")?;
+        self.web_end_pass();
 
         Ok(())
     }

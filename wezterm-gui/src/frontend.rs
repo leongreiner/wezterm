@@ -36,6 +36,12 @@ impl GuiFrontEnd {
     pub fn try_new() -> anyhow::Result<Rc<GuiFrontEnd>> {
         let connection = Connection::init()?;
         connection.set_event_handler(Self::app_event_handler);
+        // Hivegrid: what a wheel amount means depends on the backend (see mux::webpane).
+        mux::webpane::set_wheel_units(if connection.name() == "Wayland" {
+            mux::webpane::WheelUnits::Pixels
+        } else {
+            mux::webpane::WheelUnits::Lines
+        });
 
         let mux = Mux::get();
         let client_id = mux.active_identity().expect("to have set my own id");

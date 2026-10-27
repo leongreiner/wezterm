@@ -598,6 +598,10 @@ impl Domain for LocalDomain {
         command: Option<CommandBuilder>,
         command_dir: Option<String>,
     ) -> anyhow::Result<Arc<dyn Pane>> {
+        // Hivegrid: `hivegrid:web <url>` asks for a web pane instead of a process.
+        if let Some(web) = command.as_ref().and_then(crate::webpane::parse_spawn) {
+            return crate::webpane::spawn(self.id, size, web);
+        }
         let pane_id = alloc_pane_id();
         let cmd = self
             .build_command(command, command_dir, pane_id)

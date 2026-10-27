@@ -6,6 +6,7 @@ members = [
   "sync-color-schemes",
   "deps/cairo",
   "wezterm",
+  "hivegrid-web",
   "wezterm-blob-leases",
   "wezterm-cell",
   "wezterm-escape-parser",
@@ -114,6 +115,7 @@ guillotiere = "0.6"
 harfbuzz = { path = "deps/harfbuzz" }
 heapless = "0.8"
 hdrhistogram = "7.1"
+hivegrid-web = { path = "hivegrid-web" }
 hex = {version="0.4", default-features=false}
 hostname = "0.4"
 http_req = "0.11"

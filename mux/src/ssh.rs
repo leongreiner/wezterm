@@ -705,6 +705,8 @@ impl Domain for RemoteSshDomain {
         command: Option<CommandBuilder>,
         command_dir: Option<String>,
     ) -> anyhow::Result<Arc<dyn Pane>> {
+        // Hivegrid: the remote would run the web pane sentinel as a program.
+        crate::webpane::refuse_in_remote_domain(command.as_ref())?;
         let pane_id = alloc_pane_id();
 
         let (command_line, env) = self

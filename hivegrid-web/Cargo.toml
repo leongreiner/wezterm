@@ -1,0 +1,24 @@
+[package]
+name = "hivegrid-web"
+version = "0.1.0"
+authors = ["Hivegrid"]
+edition = "2021"
+publish = false
+description = "Web engine for the Hivegrid web pane: headless Chrome driven over the DevTools protocol"
+
+[dependencies]
+anyhow.workspace = true
+base64 = { workspace = true, features = ["std"] }
+flume.workspace = true
+libc.workspace = true
+log.workspace = true
+metrics.workspace = true
+parking_lot.workspace = true
+serde_json.workspace = true
+termwiz.workspace = true
+zune-core = "0.5"
+zune-jpeg = "0.5"
+
+[dev-dependencies]
+image.workspace = true
+tempfile.workspace = true

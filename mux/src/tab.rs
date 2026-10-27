@@ -277,6 +277,7 @@ fn pane_tree(
                 left_col,
                 top_row,
                 tty_name: pane.tty_name(),
+                is_web: pane.copy_user_vars().get("hivegrid_web").is_some_and(|v| v == "1"),
             })
         }
     }
@@ -2502,6 +2503,9 @@ pub struct PaneEntry {
     pub top_row: usize,
     pub left_col: usize,
     pub tty_name: Option<String>,
+    /// Hivegrid: the pane is a web pane (user var `hivegrid_web=1`).
+    #[serde(default)]
+    pub is_web: bool,
 }
 
 #[derive(Deserialize, Clone, Serialize, PartialEq, Debug)]

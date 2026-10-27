@@ -47,6 +47,7 @@ pub mod termwiztermtab;
 pub mod tmux;
 pub mod tmux_commands;
 mod tmux_pty;
+pub mod webpane;
 pub mod window;
 
 use crate::activity::Activity;
@@ -1171,6 +1172,9 @@ impl Mux {
             match pane {
                 Some(pane) if pane.domain_id() == target_domain => pane
                     .get_current_working_dir(policy)
+                    // Hivegrid: a web pane's directory is its page URL, never a path. Other
+                    // panes keep their behaviour whatever scheme their OSC 7 named.
+                    .filter(|_| !pane.is::<webpane::WebPane>())
                     .and_then(|url| {
                         percent_decode_str(url.path())
                             .decode_utf8()
