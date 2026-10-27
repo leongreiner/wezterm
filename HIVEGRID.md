@@ -176,6 +176,11 @@ wezterm/wezterm.
     profile, after the last pane of the profile closed. Chromium-family only (CDP screencast);
     Firefox has none. Snap and Flatpak browsers are not supported (confined: the hidden profile
     directory is out of their reach and their launcher does not reliably pass the fd 3/4 pipe).
+    The browser reports as a plain Chrome: `--disable-blink-features=AutomationControlled` and a
+    `--user-agent` of `Chrome/<major>.0.0.0` built from `<browser> --version` (a `--user-agent` in
+    `HIVEGRID_WEB_FLAGS` wins), because `HeadlessChrome` and `navigator.webdriver` get a page
+    refused. The DevTools pipe is still read as automation by Google's sign-in: `bin/hivegrid-web-signin`
+    signs in in a plain Chrome window on the profile instead.
     Other knobs: `HIVEGRID_WEB_QUALITY`, `HIVEGRID_WEB_SCALE`,
     `HIVEGRID_WEB_DEVTOOLS` (see Security below, and `hivegrid-web/src/lib.rs`).
   - Security notes for the web pane:

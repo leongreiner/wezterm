@@ -131,8 +131,40 @@ pub(crate) fn chrome_env_allowed(name: &str) -> bool {
         || name.starts_with("HIVEGRID_WEB_")
 }
 
-/// Command line flags of the browser (everything after the binary).
-pub(crate) fn chrome_args(cfg: &WebConfig, profile_dir: &Path, devtools_port: bool) -> Vec<String> {
+/// The user agent of a Chrome that is not headless: what `chrome --version` printed
+/// (`Google Chrome 154.0.8037.92`) as Chrome's reduced user agent. Headless Chrome's own says
+/// `HeadlessChrome`, which sites such as Google's sign-in take as automation. `None` when the
+/// output holds no `<major>.` version.
+pub(crate) fn user_agent_from_version(output: &str) -> Option<String> {
+    let major = output
+        .split_whitespace()
+        .find_map(|w| w.split_once('.').map(|(m, _)| m).filter(|m| !m.is_empty() && m.chars().all(|c| c.is_ascii_digit())))?;
+    Some(format!(
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
+    ))
+}
+
+/// `chrome --version`, run with the same minimal environment as the browser itself.
+fn chrome_version(chrome: &Path) -> Option<String> {
+    let out = Command::new(chrome)
+        .arg("--version")
+        .env_clear()
+        .envs(std::env::vars_os().filter(|(k, _)| k.to_str().is_some_and(chrome_env_allowed)))
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Command line flags of the browser (everything after the binary). `user_agent` replaces the
+/// headless one unless the extra flags bring their own.
+pub(crate) fn chrome_args(
+    cfg: &WebConfig,
+    profile_dir: &Path,
+    devtools_port: bool,
+    user_agent: Option<&str>,
+) -> Vec<String> {
     let mut a: Vec<String> = [
         "--headless=new",
         "--remote-debugging-pipe",
@@ -149,11 +181,16 @@ pub(crate) fn chrome_args(cfg: &WebConfig, profile_dir: &Path, devtools_port: bo
         "--disable-renderer-backgrounding",
         "--disable-backgrounding-occluded-windows",
         "--disable-background-timer-throttling",
+        // Headless Chrome sets navigator.webdriver; the browser is driven by a person here.
+        "--disable-blink-features=AutomationControlled",
     ]
     .iter()
     .map(|s| s.to_string())
     .collect();
     a.push(format!("--user-data-dir={}", profile_dir.display()));
+    if let Some(ua) = user_agent.filter(|_| !cfg.extra_flags.iter().any(|f| f.starts_with("--user-agent"))) {
+        a.push(format!("--user-agent={ua}"));
+    }
     if devtools_port {
         log::warn!(
             "HIVEGRID_WEB_DEVTOOLS=1: Chrome opens a remote debugging port on 127.0.0.1 without \
@@ -305,7 +342,8 @@ impl Launcher for ChromeLauncher {
         let parent_pid = unsafe { libc::getpid() };
 
         let mut cmd = Command::new(&chrome);
-        cmd.args(chrome_args(cfg, &profile_dir, devtools_port))
+        let user_agent = chrome_version(&chrome).and_then(|v| user_agent_from_version(&v));
+        cmd.args(chrome_args(cfg, &profile_dir, devtools_port, user_agent.as_deref()))
             .env_clear()
             .envs(std::env::vars_os().filter(|(k, _)| k.to_str().is_some_and(chrome_env_allowed)))
             .stdin(Stdio::null())
@@ -880,7 +918,7 @@ mod tests {
             extra_flags: vec!["--foo".into()],
             ..Default::default()
         };
-        let args = chrome_args(&cfg, Path::new("/d/profile-x"), false);
+        let args = chrome_args(&cfg, Path::new("/d/profile-x"), false, None);
         assert!(args.contains(&"--headless=new".to_string()));
         assert!(args.contains(&"--remote-debugging-pipe".to_string()));
         assert!(args.contains(&"--user-data-dir=/d/profile-x".to_string()));
@@ -888,8 +926,26 @@ mod tests {
         assert!(!args.iter().any(|a| a.starts_with("--remote-debugging-port")));
         assert_eq!(args.last().unwrap(), "about:blank");
         assert_eq!(args[args.len() - 2], "--foo");
-        let with_port = chrome_args(&cfg, Path::new("/d/p"), true);
+        let with_port = chrome_args(&cfg, Path::new("/d/p"), true, None);
         assert!(with_port.contains(&"--remote-debugging-port=0".to_string()));
+    }
+
+    #[test]
+    fn the_user_agent_is_that_of_a_plain_chrome_unless_the_flags_bring_one() {
+        let ua = user_agent_from_version("Google Chrome 154.0.8037.92 \n").unwrap();
+        assert!(ua.contains("Chrome/154.0.0.0 Safari/537.36") && !ua.contains("Headless"), "{ua}");
+        assert_eq!(user_agent_from_version("Chromium 131.0.6778.204 built on Debian").unwrap(), user_agent_from_version("Google Chrome 131.1").unwrap());
+        assert_eq!(user_agent_from_version("no version here"), None);
+        let mut cfg = WebConfig::default();
+        let has = |a: &[String]| a.iter().filter(|f| f.starts_with("--user-agent=")).count();
+        let args = chrome_args(&cfg, Path::new("/d/p"), false, Some(&ua));
+        assert_eq!(has(&args), 1);
+        assert!(args.contains(&"--disable-blink-features=AutomationControlled".to_string()));
+        assert_eq!(has(&chrome_args(&cfg, Path::new("/d/p"), false, None)), 0);
+        cfg.extra_flags = vec!["--user-agent=mine".into()];
+        let args = chrome_args(&cfg, Path::new("/d/p"), false, Some(&ua));
+        assert_eq!(has(&args), 1);
+        assert!(args.contains(&"--user-agent=mine".to_string()));
     }
 
     #[test]
