@@ -88,7 +88,7 @@ pub(crate) fn find_chrome_in(
 /// Directory name of a profile: injective, so two profile names never share a directory (and
 /// so one Chrome). ASCII letters, digits, `-`, `_` and `.` stay; every other byte (including `/`
 /// and `%`) becomes `%XX`. The empty name is `main`.
-pub(crate) fn profile_dir_name(profile: &str) -> String {
+pub fn profile_dir_name(profile: &str) -> String {
     use std::fmt::Write as _;
     if profile.is_empty() {
         return "profile-main".to_string();

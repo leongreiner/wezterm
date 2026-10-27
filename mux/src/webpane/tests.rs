@@ -1500,7 +1500,6 @@ fn while_typing_no_key_reaches_the_page_and_escape_gives_the_field_up() {
     let f = fixture_header();
     send(&f, "location");
     type_text(&f, "abc");
-    press(&f, KeyCode::Tab);
     press(&f, KeyCode::UpArrow);
     f.pane.key_up(KeyCode::Char('a'), KeyModifiers::NONE).unwrap();
     f.pane.send_paste("def").unwrap();
@@ -1567,7 +1566,8 @@ fn field_keys() {
     assert_eq!(field_key(&KeyCode::Backspace, ctrl), FieldKey::Edit(EditKey::DeleteWord));
     assert_eq!(field_key(&KeyCode::Char('v'), ctrl), FieldKey::Ignore);
     assert_eq!(field_key(&KeyCode::Char('x'), KeyModifiers::ALT), FieldKey::Ignore);
-    assert_eq!(field_key(&KeyCode::Tab, n), FieldKey::Ignore);
+    assert_eq!(field_key(&KeyCode::Tab, n), FieldKey::Edit(EditKey::Accept));
+    assert_eq!(field_key(&KeyCode::UpArrow, n), FieldKey::Ignore);
     assert_eq!(field_key(&KeyCode::Enter, n), FieldKey::Commit);
     assert_eq!(field_key(&KeyCode::Escape, n), FieldKey::Cancel);
 }
@@ -1590,4 +1590,82 @@ impl Fixture {
     fn ctl_editing(&self) -> bool {
         self.pane.ctl.is_editing()
     }
+}
+
+/// A pane that has been to teams.test twice and to tesla.test once.
+fn fixture_with_history() -> Fixture {
+    let f = fixture_header();
+    for url in ["https://teams.test/a", "https://tesla.test/", "https://teams.test/b"] {
+        f.engine.view.set_info(url, "");
+        f.engine.emit(WebEvent::Info);
+    }
+    f
+}
+
+fn locate(f: &Fixture) {
+    send(f, "location");
+    press(f, KeyCode::Backspace);
+}
+
+#[test]
+fn visited_pages_are_remembered_once_per_address_change() {
+    let f = fixture_with_history();
+    f.engine.view.set_info("https://teams.test/b", "same page, new title");
+    f.engine.emit(WebEvent::Info);
+    f.engine.view.set_info("data:text/html,x", "");
+    f.engine.emit(WebEvent::Info);
+    let h = f.pane.ctl.history.as_ref().unwrap().lock();
+    assert_eq!(h.len(), 3, "a title change is no visit, a data: page is not kept");
+}
+
+#[test]
+fn typing_te_offers_teams_and_tab_takes_it() {
+    let f = fixture_with_history();
+    locate(&f);
+    type_text(&f, "te");
+    assert!(header_row(&f).contains("teams.test"), "{:?}", header_row(&f));
+    assert_eq!(f.pane.ctl.header.lock().edit.as_ref().unwrap().text(), "te", "the offer is not text yet");
+    press(&f, KeyCode::Tab);
+    assert_eq!(f.pane.ctl.header.lock().edit.as_ref().unwrap().text(), "teams.test");
+    press(&f, KeyCode::Enter);
+    assert_eq!(f.engine.view.calls(), vec!["navigate https://teams.test"], "the accepted text is an address like any typed");
+}
+
+#[test]
+fn enter_on_an_offer_opens_it_and_backspace_gives_it_up() {
+    let f = fixture_with_history();
+    locate(&f);
+    type_text(&f, "te");
+    press(&f, KeyCode::Enter);
+    assert_eq!(f.engine.view.calls(), vec!["navigate https://teams.test/"]);
+    locate(&f);
+    type_text(&f, "te");
+    press(&f, KeyCode::Backspace);
+    assert!(!header_row(&f).contains("teams.test"), "{:?}", header_row(&f));
+    with_settings(None, || press(&f, KeyCode::Enter));
+    assert_eq!(f.engine.view.calls()[1], "navigate https://www.google.com/search?q=t", "what is left is a search");
+}
+
+#[test]
+fn a_paste_is_never_completed_and_typing_goes_on_after_the_offer() {
+    let f = fixture_with_history();
+    locate(&f);
+    f.pane.send_paste("te").unwrap();
+    assert!(!header_row(&f).contains("teams.test"));
+    type_text(&f, "s");
+    assert!(header_row(&f).contains("la.test"), "{:?}", header_row(&f));
+    press(&f, KeyCode::RightArrow);
+    assert_eq!(f.pane.ctl.header.lock().edit.as_ref().unwrap().text(), "tesla.test");
+}
+
+#[test]
+fn a_private_pane_remembers_and_offers_nothing() {
+    let engine = FakeEngine::new();
+    let host = Arc::new(FakeHost::default());
+    let mut spawn = spawn_of("https://example.com/");
+    spawn.private = true;
+    let pane = WebPane::new(&engine, host, 9, 3, size(80, 24, 800, 480, 96), spawn).unwrap();
+    engine.view.set_info("https://teams.test/", "");
+    engine.emit(WebEvent::Info);
+    assert!(pane.ctl.history.is_none());
 }

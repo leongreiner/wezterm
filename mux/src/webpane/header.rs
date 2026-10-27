@@ -91,6 +91,8 @@ pub enum EditKey {
     KillToEnd,
     DeleteWord,
     SelectAll,
+    /// Take the offered completion (Tab).
+    Accept,
 }
 
 /// The address field while it is being typed in.
@@ -100,6 +102,8 @@ pub struct Edit {
     cursor: usize,
     /// The whole text is selected: the next character replaces it.
     all: bool,
+    /// What history offers after the text: (the rest of the address, the address to open).
+    suggestion: Option<(String, String)>,
 }
 
 fn char_width(c: char) -> usize {
@@ -113,7 +117,22 @@ fn width_of(chars: &[char]) -> usize {
 impl Edit {
     pub fn new(text: &str) -> Self {
         let text: Vec<char> = text.chars().filter(|c| !c.is_control()).collect();
-        Self { cursor: text.len(), all: !text.is_empty(), text }
+        Self { cursor: text.len(), all: !text.is_empty(), text, suggestion: None }
+    }
+
+    /// The caret is after the last character and nothing is selected: the only place a completion
+    /// can be offered.
+    pub fn at_end(&self) -> bool {
+        !self.all && self.cursor == self.text.len()
+    }
+
+    pub fn set_suggestion(&mut self, s: Option<(String, String)>) {
+        self.suggestion = s.filter(|_| self.at_end());
+    }
+
+    /// The address a completion on offer opens.
+    pub fn suggested_url(&self) -> Option<&str> {
+        self.suggestion.as_ref().map(|(_, url)| url.as_str())
     }
 
     pub fn text(&self) -> String {
@@ -134,6 +153,7 @@ impl Edit {
         if clean.is_empty() {
             return;
         }
+        self.suggestion = None;
         if self.all {
             self.text.clear();
             self.cursor = 0;
@@ -146,7 +166,17 @@ impl Edit {
 
     pub fn key(&mut self, key: EditKey) {
         let all = std::mem::replace(&mut self.all, false);
+        // Any key but the ones that take it drops the offer (Backspace gives it up, as in a
+        // browser's address bar).
+        if let Some((rest, _)) = self.suggestion.take() {
+            if self.cursor == self.text.len() && !all && matches!(key, EditKey::Accept | EditKey::Right | EditKey::End) {
+                self.text.extend(rest.chars());
+                self.cursor = self.text.len();
+                return;
+            }
+        }
         match key {
+            EditKey::Accept => {}
             EditKey::SelectAll => self.all = !self.text.is_empty(),
             _ if all && matches!(key, EditKey::Backspace | EditKey::Delete | EditKey::DeleteWord | EditKey::KillToStart | EditKey::KillToEnd) => {
                 self.text.clear();
@@ -275,8 +305,22 @@ impl Header {
                 } else {
                     let start = row.used;
                     row.push(FIELD, &before);
-                    row.push("100;7", &at.map(String::from).unwrap_or_else(|| " ".into()));
-                    row.push(FIELD, &after);
+                    // A completion on offer: its first character carries the caret.
+                    let ghost = match (&edit.suggestion, at, after.is_empty()) {
+                        (Some((rest, _)), None, true) => {
+                            fit_plain(rest, room.saturating_sub(row.used - start))
+                        }
+                        _ => String::new(),
+                    };
+                    if ghost.is_empty() {
+                        row.push("100;7", &at.map(String::from).unwrap_or_else(|| " ".into()));
+                        row.push(FIELD, &after);
+                    } else {
+                        let mut chars = ghost.chars();
+                        let first: String = chars.by_ref().take(1).collect();
+                        row.push("100;7", &first);
+                        row.push("100;2", chars.as_str());
+                    }
                     row.pad(FIELD, room.saturating_sub(row.used - start));
                 }
             }
@@ -296,6 +340,21 @@ impl Header {
         }
         row.finish()
     }
+}
+
+/// The start of `s` that fits `cols` columns.
+fn fit_plain(s: &str, cols: usize) -> String {
+    let mut out = String::new();
+    let mut width = 0;
+    for c in s.chars().filter(|c| !c.is_control()) {
+        let w = char_width(c);
+        if width + w > cols {
+            break;
+        }
+        width += w;
+        out.push(c);
+    }
+    out
 }
 
 /// `s` cut to `cols` columns, ending in `…` when something was cut.

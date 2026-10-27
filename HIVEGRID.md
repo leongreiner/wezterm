@@ -253,7 +253,12 @@ wezterm/wezterm.
     `normalize_url` reads it, else a search with `web.search` of `settings.json`, Google when
     the key is absent) and navigates, an unopenable location stays in the field with the
     reason in its place until the next key, Esc or a click on the page ends the edit. The
-    state is per pane and not persisted.
+    state is per pane and not persisted. The field completes from a per-profile address history
+    (`mux/src/webpane/history.rs`: `profile-<name>.history.json` next to the browser profile; the
+    view's `Info` events record the page's address once per change, without query and fragment;
+    none in a private pane): `Edit` holds the offer (`set_suggestion`, shown dim after the text with
+    the caret on its first character), Tab, Right and End take it, Enter opens its address, and
+    Backspace dismisses it. Pastes are never completed.
   - What Hivegrid reads from it: the user var `hivegrid_web=1` (Lua: `pane:get_user_vars()`);
     in `wezterm cli list` a web pane has `is_web: true` (the field is new in codec 47; `false`
     for every other pane), `tty_name: null`, the page URL as `cwd` (any scheme but `file:`) and

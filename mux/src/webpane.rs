@@ -46,6 +46,7 @@ use wezterm_term::{
     StableRowIndex, Terminal, TerminalConfiguration, TerminalSize,
 };
 use header::{layout, Edit, EditKey, Header, Hit, Hover};
+use history::History;
 use hivegrid_web::{ApcCommand, HeaderOp};
 
 /// The program name that asks a domain for a web pane instead of a process.
@@ -527,6 +528,29 @@ struct Events {
     closed: Arc<AtomicBool>,
     /// A `PaneOutput` is queued for the main thread (see `WebHost::pane_output`).
     output_pending: Arc<AtomicBool>,
+    /// Where visited addresses go (`None`: a private pane), and the view to ask for them. The view
+    /// is set once it exists; it holds this callback, so only weakly.
+    recorder: Option<Recorder>,
+}
+
+struct Recorder {
+    history: Arc<Mutex<History>>,
+    view: Arc<OnceLock<std::sync::Weak<dyn WebView>>>,
+    last: Mutex<String>,
+}
+
+impl Recorder {
+    /// The page moved: remember its address once per change.
+    fn visited(&self) {
+        let Some(view) = self.view.get().and_then(|w| w.upgrade()) else { return };
+        let url = view.info().url;
+        let mut last = self.last.lock();
+        if url.is_empty() || *last == url {
+            return;
+        }
+        last.clone_from(&url);
+        self.history.lock().record(&url, now_secs());
+    }
 }
 
 impl Events {
@@ -537,6 +561,9 @@ impl Events {
                 self.host.pane_output(pane_id, &self.output_pending);
             }
             WebEvent::Info => {
+                if let Some(r) = &self.recorder {
+                    r.visited();
+                }
                 // Title and URL changed: the tab and window titles follow `get_title`.
                 self.host.notify(MuxNotification::Alert {
                     pane_id,
@@ -560,6 +587,26 @@ impl Events {
     }
 }
 
+/// The history of a profile: its file next to the browser profile. Tests keep it in memory, so
+/// they neither read nor write the real one.
+#[cfg(not(test))]
+fn load_history(profile: &str) -> History {
+    let name = hivegrid_web::profile_dir_name(profile);
+    History::load(data_root().join(format!("{name}.history.json")))
+}
+
+#[cfg(test)]
+fn load_history(_profile: &str) -> History {
+    History::new()
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// What the header row and the control channel share with the pane: the header state and the
 /// ways it changes the view and the placeholder. No lock is held across another.
 struct HeaderCtl {
@@ -569,6 +616,9 @@ struct HeaderCtl {
     output_pending: Arc<AtomicBool>,
     placeholder: Arc<Mutex<Placeholder>>,
     header: Mutex<Header>,
+    /// The addresses of the profile, for the field's completion; `None` in a private pane, which
+    /// remembers nothing.
+    history: Option<Arc<Mutex<History>>>,
 }
 
 impl HeaderCtl {
@@ -652,11 +702,20 @@ impl HeaderCtl {
         });
     }
 
-    fn edit_insert(&self, text: &str) {
+    /// Typed (`suggest`) or pasted text into the field. Typing at the end of the text offers the
+    /// history's completion; a paste never does, so it cannot be redirected by one.
+    fn edit_insert(&self, text: &str, suggest: bool) {
+        let offer = |typed: &str| {
+            let history = self.history.as_ref()?;
+            let c = history.lock().complete(typed, now_secs())?;
+            Some((c.suffix, c.url))
+        };
         self.change(|h| {
             h.error = None;
             if let Some(e) = &mut h.edit {
                 e.insert(text);
+                let found = if suggest && e.at_end() { offer(&e.text()) } else { None };
+                e.set_suggestion(found);
             }
         });
     }
@@ -664,11 +723,17 @@ impl HeaderCtl {
     /// Enter in the field: open the address, or search for the words. A location that cannot
     /// be opened stays in the field, with the reason in its place until the next key.
     fn commit(&self) {
-        let text = match &self.header.lock().edit {
-            Some(e) => e.text(),
+        let (text, suggested) = match &self.header.lock().edit {
+            Some(e) => (e.text(), e.suggested_url().map(str::to_string)),
             None => return,
         };
         if text.trim().is_empty() {
+            self.cancel_edit();
+            return;
+        }
+        // Enter on a completion opens what it stands for.
+        if let Some(url) = suggested {
+            self.view.navigate(&url);
             self.cancel_edit();
             return;
         }
@@ -778,11 +843,18 @@ impl WebPane {
         let size = normalize_size(size);
         let closed = Arc::new(AtomicBool::new(false));
         let output_pending = Arc::new(AtomicBool::new(false));
+        let history = (!spawn.private).then(|| Arc::new(Mutex::new(load_history(&spawn.profile))));
+        let view_slot: Arc<OnceLock<std::sync::Weak<dyn WebView>>> = Arc::new(OnceLock::new());
         let events = Events {
             pane_id,
             host: Arc::clone(&host),
             closed: Arc::clone(&closed),
             output_pending: Arc::clone(&output_pending),
+            recorder: history.as_ref().map(|h| Recorder {
+                history: Arc::clone(h),
+                view: Arc::clone(&view_slot),
+                last: Mutex::new(String::new()),
+            }),
         };
         let cfg = WebConfig {
             chrome: browser_choice(
@@ -803,6 +875,7 @@ impl WebPane {
             view_size(&size, Header::new().rows(size.rows)),
             Box::new(move |event| events.handle(event)),
         )?;
+        let _ = view_slot.set(Arc::downgrade(&view));
 
         let term = Terminal::new(
             size,
@@ -819,6 +892,7 @@ impl WebPane {
             output_pending,
             placeholder: Arc::clone(&placeholder),
             header: Mutex::new(Header::new()),
+            history,
         });
         let writer = ControlWriter {
             pane_id,
@@ -1108,7 +1182,7 @@ impl Pane for WebPane {
 
     fn send_paste(&self, text: &str) -> Result<()> {
         if self.ctl.is_editing() {
-            self.ctl.edit_insert(text);
+            self.ctl.edit_insert(text, false);
         } else {
             self.view.insert_text(text);
         }
@@ -1117,7 +1191,7 @@ impl Pane for WebPane {
 
     fn send_composed_text(&self, text: &str) -> Result<()> {
         if self.ctl.is_editing() {
-            self.ctl.edit_insert(text);
+            self.ctl.edit_insert(text, true);
         } else {
             self.view.insert_text(text);
         }
@@ -1158,7 +1232,7 @@ impl Pane for WebPane {
                 FieldKey::Commit => self.ctl.commit(),
                 FieldKey::Cancel => self.ctl.cancel_edit(),
                 FieldKey::Edit(k) => self.ctl.edit_key(k),
-                FieldKey::Text(s) => self.ctl.edit_insert(&s),
+                FieldKey::Text(s) => self.ctl.edit_insert(&s, true),
                 FieldKey::Ignore => {}
             }
             return Ok(());
@@ -1337,11 +1411,13 @@ fn field_key(key: &KeyCode, mods: KeyModifiers) -> FieldKey {
                 None => FieldKey::Text(c.to_string()),
             }
         }
+        KeyCode::Tab => FieldKey::Edit(EditKey::Accept),
         _ => FieldKey::Ignore,
     }
 }
 
 mod header;
+mod history;
 
 #[cfg(test)]
 mod tests;
