@@ -232,7 +232,7 @@ wezterm/wezterm.
     keywords, and a view's events reach the GUI as at most one queued redraw per pane.
   - Control channel: `ESC _ hgweb ; <command> [; <arg>] ESC \` written to the pane (Lua
     `pane:send_text`, `wezterm cli send-text --no-paste`): `navigate;URL`, `back`, `forward`,
-    `reload`, `hardreload`, `stop`, `restart`, `copy-url`, `zoom;PERCENT`, `header;toggle|show|hide`,
+    `reload`, `hardreload`, `stop`, `restart`, `copy-url`, `zoom;PERCENT`, `header;toggle|show|hide`, `tab;...` (Tabs, below),
     `location` (header row, below) and `devtools` (only with `HIVEGRID_WEB_DEVTOOLS=1`). Output of
     a program in a terminal pane never reaches it: the sequence has to be written to the web pane
     itself.
@@ -263,6 +263,25 @@ wezterm/wezterm.
     `WebPane::header_rows` what the texture starts below). Down/Up and hover pick one, a click or
     Enter opens it, Tab, Right and End take the picked or inline one into the field, Backspace
     dismisses the offers. Pastes are never completed.
+  - Tabs (`mux/src/webpane.rs` `Tabs`, `HeaderCtl::tab_op`; strip in `webpane/header.rs`
+    `strip_layout`, `render_strip`): a web pane holds up to 16 tabs, each its own `WebView` created
+    through the same engine and `WebConfig` (profile, privacy and browser of the pane). Only the
+    active tab is `set_visible` and focused; the pane's visibility and focus as the GUI last said
+    them (`Tabs::visible`, `Tabs::focused`) are handed to a tab when it becomes active, and the
+    page is resized to the rows it has then. From the second tab on, row 0 is a tab strip (a pane
+    of 4 rows or more), drawn like the header by the placeholder terminal, so `header_rows()`
+    counts it and the texture starts below it; mouse events on it pick (`StripHit::Tab`), close
+    (`Close`, the `×`, or a middle click) or open (`New`, the `+`). Events carry their tab: only
+    the active tab's frames, cursor and `Info` alert redraw/retitle the pane (a hidden tab's
+    `Info` redraws the strip), `Closed` removes that tab and only the last one marks the pane
+    dead. Everything the pane forwards (mouse, keys, paste, resize, the control channel's
+    `navigate`, `back`, ..., `get_title`, `get_current_working_dir`, `cursor`) acts on the active
+    tab. Keys, handled before the page sees them (press and release): Ctrl+T new (an
+    `about:blank` tab with the address field open), Ctrl+W close, Ctrl+Tab / Ctrl+PageDown next,
+    Ctrl+Shift+Tab / Ctrl+PageUp previous, Ctrl+1..9 pick. Control channel: `tab;new[;URL]`,
+    `tab;close`, `tab;next`, `tab;prev`, `tab;select;N` (from 1); a refused URL opens nothing and
+    the last tab is never closed by `tab;close`. A tab opens right of the active one. Only the
+    active tab's address is reported as the pane's directory, so the session restore keeps that.
   - What Hivegrid reads from it: the user var `hivegrid_web=1` (Lua: `pane:get_user_vars()`);
     in `wezterm cli list` a web pane has `is_web: true` (the field is new in codec 47; `false`
     for every other pane), `tty_name: null`, the page URL as `cwd` (any scheme but `file:`) and

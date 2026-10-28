@@ -45,9 +45,12 @@ use wezterm_term::{
     Alert, ClipboardSelection, KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     StableRowIndex, Terminal, TerminalConfiguration, TerminalSize,
 };
-use header::{layout, Edit, EditKey, Header, Hit, Hover};
+use header::{
+    layout, render_strip, strip_layout, Edit, EditKey, Header, Hit, Hover, StripHit, MAX_TABS,
+    MIN_PANE_ROWS,
+};
 use history::History;
-use hivegrid_web::{ApcCommand, HeaderOp};
+use hivegrid_web::{ApcCommand, HeaderOp, TabOp};
 
 /// The program name that asks a domain for a web pane instead of a process.
 pub const SPAWN_SENTINEL: &str = "hivegrid:web";
@@ -329,7 +332,7 @@ pub fn spawn(domain_id: DomainId, size: TerminalSize, spawn: WebSpawn) -> Result
         )
     })?;
     let pane: Arc<dyn Pane> = Arc::new(WebPane::new(
-        &**engine,
+        Arc::clone(engine),
         Arc::new(MuxHost),
         alloc_pane_id(),
         domain_id,
@@ -524,13 +527,11 @@ struct LastPress {
     count: u8,
 }
 
-/// What the view reports, turned into mux notifications. Lives in the view's callback.
+/// What a view reports, turned into mux notifications. Lives in the view's callback.
 struct Events {
-    pane_id: PaneId,
-    host: Arc<dyn WebHost>,
-    closed: Arc<AtomicBool>,
-    /// A `PaneOutput` is queued for the main thread (see `WebHost::pane_output`).
-    output_pending: Arc<AtomicBool>,
+    /// Weak: the control holds the views, and the views hold this callback.
+    ctl: std::sync::Weak<HeaderCtl>,
+    tab_id: u64,
     /// Where visited addresses go (`None`: a private pane), and the view to ask for them. The view
     /// is set once it exists; it holds this callback, so only weakly.
     recorder: Option<Recorder>,
@@ -558,34 +559,8 @@ impl Recorder {
 
 impl Events {
     fn handle(&self, event: WebEvent) {
-        let pane_id = self.pane_id;
-        match event {
-            WebEvent::Frame | WebEvent::State | WebEvent::Cursor(_) => {
-                self.host.pane_output(pane_id, &self.output_pending);
-            }
-            WebEvent::Info => {
-                if let Some(r) = &self.recorder {
-                    r.visited();
-                }
-                // Title and URL changed: the tab and window titles follow `get_title`.
-                self.host.notify(MuxNotification::Alert {
-                    pane_id,
-                    alert: Alert::CurrentWorkingDirectoryChanged,
-                });
-                self.host.pane_output(pane_id, &self.output_pending);
-            }
-            WebEvent::ClipboardText(text) => {
-                self.host.notify(MuxNotification::AssignClipboard {
-                    pane_id,
-                    selection: ClipboardSelection::Clipboard,
-                    clipboard: Some(text),
-                });
-            }
-            WebEvent::Closed => {
-                self.closed.store(true, Ordering::SeqCst);
-                self.host.pane_output(pane_id, &self.output_pending);
-                self.host.prune();
-            }
+        if let Some(ctl) = self.ctl.upgrade() {
+            ctl.on_event(self.tab_id, event, self.recorder.as_ref());
         }
     }
 }
@@ -610,11 +585,72 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// What the header row and the control channel share with the pane: the header state and the
-/// ways it changes the view and the placeholder. No lock is held across another.
+/// One page of the pane.
+struct Tab {
+    id: u64,
+    view: Arc<dyn WebView>,
+    /// The address the tab was opened on, shown until the page reports its own.
+    initial_url: String,
+}
+
+/// The tabs of a pane; never empty once the pane exists. Only the active tab is shown and has
+/// the focus: the others are hidden (their pages stop rendering) and catch up when picked.
+struct Tabs {
+    list: Vec<Tab>,
+    active: usize,
+    next_id: u64,
+    /// What the GUI last said about the pane; the active tab gets it.
+    visible: bool,
+    focused: bool,
+}
+
+impl Tabs {
+    fn active(&self) -> &Tab {
+        &self.list[self.active]
+    }
+
+    /// True for the active tab; also while the pane has no tab yet (its first page is being created).
+    fn is_active(&self, id: u64) -> bool {
+        self.list.get(self.active).map_or(true, |t| t.id == id)
+    }
+
+    /// Takes tab `idx` out (the list keeps at least one). The tab right of it takes its place, else
+    /// the one on its left. Returns it, and the view now active when the active tab was the one
+    /// taken.
+    fn take(&mut self, idx: usize) -> (Tab, Option<Arc<dyn WebView>>) {
+        let tab = self.list.remove(idx);
+        let was_active = idx == self.active;
+        if idx < self.active || (was_active && self.active >= self.list.len()) {
+            self.active -= 1;
+        }
+        (tab, was_active.then(|| Arc::clone(&self.active().view)))
+    }
+}
+
+/// What a tab says about itself in the strip: the title, else the host of the address, else
+/// "New tab" for a blank page.
+fn tab_title(info: &PageInfo, initial_url: &str) -> String {
+    if !info.title.is_empty() {
+        return info.title.clone();
+    }
+    let url = if info.url.is_empty() { initial_url } else { &info.url };
+    if url.is_empty() || url == DEFAULT_URL {
+        return "New tab".to_string();
+    }
+    Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_else(|| url.to_string())
+}
+
+/// What the header row, the tabs and the control channel share with the pane: the header state,
+/// the pages, and the ways they change the views and the placeholder. No lock is held across
+/// another, except the header's across the tabs' (never the other way round).
 struct HeaderCtl {
     pane_id: PaneId,
-    view: Arc<dyn WebView>,
+    engine: Arc<dyn WebEngine>,
+    /// The browser, profile and privacy every tab of the pane opens with.
+    cfg: WebConfig,
     host: Arc<dyn WebHost>,
     output_pending: Arc<AtomicBool>,
     placeholder: Arc<Mutex<Placeholder>>,
@@ -622,6 +658,9 @@ struct HeaderCtl {
     /// The addresses of the profile, for the field's completion; `None` in a private pane, which
     /// remembers nothing.
     history: Option<Arc<Mutex<History>>>,
+    tabs: Mutex<Tabs>,
+    /// The last page closed itself (`window.close()`).
+    closed: AtomicBool,
 }
 
 impl HeaderCtl {
@@ -629,11 +668,33 @@ impl HeaderCtl {
         self.placeholder.lock().term.get_size()
     }
 
-    /// Rows at the top of the pane the page does not cover: the header row (0 or 1) and the
-    /// dropdown of the field.
+    /// The active tab's page.
+    fn view(&self) -> Arc<dyn WebView> {
+        Arc::clone(&self.tabs.lock().active().view)
+    }
+
+    /// The active tab's page and the address it was opened on.
+    fn active_tab(&self) -> (Arc<dyn WebView>, String) {
+        let t = self.tabs.lock();
+        (Arc::clone(&t.active().view), t.active().initial_url.clone())
+    }
+
+    fn initial_url(&self) -> String {
+        self.tabs.lock().active().initial_url.clone()
+    }
+
+    /// Rows of the tab strip in a pane `pane_rows` tall: one from the second tab on, when the
+    /// pane has room for it and a header.
+    fn strip_rows(&self, pane_rows: usize) -> usize {
+        usize::from(self.tabs.lock().list.len() >= 2 && pane_rows > MIN_PANE_ROWS)
+    }
+
+    /// Rows at the top of the pane the page does not cover: the tab strip, the header row (0 or
+    /// 1) and the dropdown of the field.
     fn rows(&self) -> usize {
         let rows = self.pane_size().rows;
-        self.header.lock().top_rows(rows)
+        let strip = self.strip_rows(rows);
+        strip + self.header.lock().top_rows(rows - strip)
     }
 
     fn redraw(&self) {
@@ -644,15 +705,16 @@ impl HeaderCtl {
     /// is left of the pane. The pane is drawn again either way.
     fn change<R>(&self, f: impl FnOnce(&mut Header) -> R) -> R {
         let size = self.pane_size();
+        let strip = self.strip_rows(size.rows);
         let (result, before, after) = {
             let mut h = self.header.lock();
-            let before = h.top_rows(size.rows);
+            let before = strip + h.top_rows(size.rows - strip);
             let result = f(&mut h);
-            (result, before, h.top_rows(size.rows))
+            (result, before, strip + h.top_rows(size.rows - strip))
         };
         if before != after {
             self.placeholder.lock().shown = None;
-            self.view.resize(view_size(&size, after));
+            self.view().resize(view_size(&size, after));
         }
         self.redraw();
         result
@@ -679,7 +741,7 @@ impl HeaderCtl {
     /// Start typing in the address field, the page's address selected. A hidden header is shown
     /// for the edit only.
     fn begin_edit(&self) {
-        let url = self.view.info().url;
+        let url = self.view().info().url;
         self.change(|h| {
             if h.edit.is_none() {
                 h.edit = Some(Edit::new(if url == "about:blank" { "" } else { &url }));
@@ -736,13 +798,13 @@ impl HeaderCtl {
         }
         // Enter on a completion opens what it stands for.
         if let Some(url) = suggested {
-            self.view.navigate(&url);
+            self.view().navigate(&url);
             self.cancel_edit();
             return;
         }
         match hivegrid_web::resolve_location(&text, settings_search().as_deref()) {
             Ok(url) => {
-                self.view.navigate(&url);
+                self.view().navigate(&url);
                 self.cancel_edit();
             }
             Err(why) => self.change(|h| h.error = Some(why)),
@@ -765,15 +827,268 @@ impl HeaderCtl {
         if hit != Some(Hit::Field) {
             self.cancel_edit();
         }
-        let info = self.view.info();
+        let info = self.view().info();
         match hit {
-            Some(Hit::Back) if info.can_go_back => self.view.back(),
-            Some(Hit::Forward) if info.can_go_forward => self.view.forward(),
-            Some(Hit::Reload) if info.loading => self.view.stop(),
-            Some(Hit::Reload) => self.view.reload(false),
+            Some(Hit::Back) if info.can_go_back => self.view().back(),
+            Some(Hit::Forward) if info.can_go_forward => self.view().forward(),
+            Some(Hit::Reload) if info.loading => self.view().stop(),
+            Some(Hit::Reload) => self.view().reload(false),
             Some(Hit::Field) => self.begin_edit(),
             Some(Hit::Collapse) => self.apply(HeaderOp::Hide),
             _ => {}
+        }
+    }
+
+    // Tabs ------------------------------------------------------------------------------------
+
+    /// Creates the page of a tab; it is not part of the pane until the caller adds it.
+    fn create_tab(self: &Arc<Self>, id: u64, url: &str, size: hivegrid_web::ViewSize) -> Result<Tab> {
+        let view_slot: Arc<OnceLock<std::sync::Weak<dyn WebView>>> = Arc::new(OnceLock::new());
+        let events = Events {
+            ctl: Arc::downgrade(self),
+            tab_id: id,
+            recorder: self.history.as_ref().map(|h| Recorder {
+                history: Arc::clone(h),
+                view: Arc::clone(&view_slot),
+                last: Mutex::new(String::new()),
+            }),
+        };
+        let view = self
+            .engine
+            .create_view(url, &self.cfg, size, Box::new(move |event| events.handle(event)))?;
+        let _ = view_slot.set(Arc::downgrade(&view));
+        Ok(Tab { id, view, initial_url: sanitize_display(url, MAX_URL_CHARS) })
+    }
+
+    /// The titles of the tabs in the strip and the active index; empty with a single tab.
+    fn tab_titles(&self) -> (Vec<String>, usize) {
+        let (tabs, active) = {
+            let t = self.tabs.lock();
+            if t.list.len() < 2 {
+                return (vec![], 0);
+            }
+            let tabs: Vec<_> = t.list.iter().map(|t| (Arc::clone(&t.view), t.initial_url.clone())).collect();
+            (tabs, t.active)
+        };
+        (tabs.iter().map(|(v, initial)| tab_title(&v.info(), initial)).collect(), active)
+    }
+
+    /// After the tabs changed: `before` is the rows the page gave up before. The pane is drawn
+    /// again; a tab that became active (`activated`) gets the size, visibility and focus of the
+    /// pane, and the tab and window titles follow it.
+    fn after_tab_change(&self, before: usize, activated: Option<Arc<dyn WebView>>) {
+        let size = self.pane_size();
+        let after = self.rows();
+        if before != after || activated.is_some() {
+            self.placeholder.lock().shown = None;
+        }
+        let (visible, focused) = {
+            let t = self.tabs.lock();
+            (t.visible, t.focused)
+        };
+        match activated {
+            Some(view) => {
+                view.resize(view_size(&size, after));
+                view.set_visible(visible);
+                view.set_focused(focused);
+            }
+            None if before != after => self.view().resize(view_size(&size, after)),
+            None => {}
+        }
+        self.host.notify(MuxNotification::Alert {
+            pane_id: self.pane_id,
+            alert: Alert::CurrentWorkingDirectoryChanged,
+        });
+        self.redraw();
+    }
+
+    /// A new tab on `url` right of the active one, which it makes active. False when the pane
+    /// holds `MAX_TABS` already or the page could not be created.
+    fn open_tab(self: &Arc<Self>, url: &str) -> bool {
+        self.cancel_edit();
+        let before = self.rows();
+        let (id, count) = {
+            let mut t = self.tabs.lock();
+            if t.list.len() >= MAX_TABS {
+                return false;
+            }
+            t.next_id += 1;
+            (t.next_id - 1, t.list.len())
+        };
+        let size = self.pane_size();
+        // The strip appears with the second tab: the page starts at the size it will have.
+        let strip = usize::from(count + 1 >= 2 && size.rows > MIN_PANE_ROWS);
+        let top = strip + self.header.lock().top_rows(size.rows - strip);
+        let tab = match self.create_tab(id, url, view_size(&size, top)) {
+            Ok(tab) => tab,
+            Err(e) => {
+                log::warn!("web pane {}: cannot open a tab: {e:#}", self.pane_id);
+                return false;
+            }
+        };
+        let view = Arc::clone(&tab.view);
+        let old = {
+            let mut t = self.tabs.lock();
+            let old = Arc::clone(&t.active().view);
+            let at = t.active + 1;
+            t.list.insert(at, tab);
+            t.active = at;
+            old
+        };
+        old.set_visible(false);
+        old.set_focused(false);
+        self.after_tab_change(before, Some(view));
+        true
+    }
+
+    fn switch_to(&self, idx: usize) {
+        self.cancel_edit();
+        let before = self.rows();
+        let (old, new) = {
+            let mut t = self.tabs.lock();
+            if idx >= t.list.len() || idx == t.active {
+                return;
+            }
+            let old = Arc::clone(&t.active().view);
+            t.active = idx;
+            (old, Arc::clone(&t.active().view))
+        };
+        old.set_visible(false);
+        old.set_focused(false);
+        self.after_tab_change(before, Some(new));
+    }
+
+    /// The tab `delta` places from the active one, wrapping around.
+    fn switch_by(&self, delta: isize) {
+        let (count, active) = {
+            let t = self.tabs.lock();
+            (t.list.len() as isize, t.active as isize)
+        };
+        if count >= 2 {
+            self.switch_to((active + delta).rem_euclid(count) as usize);
+        }
+    }
+
+    /// Closes tab `idx` and its page. The last tab stays: closing the pane is the pane's own
+    /// business.
+    fn close_tab(&self, idx: usize) {
+        if self.tabs.lock().list.len() < 2 {
+            return;
+        }
+        self.cancel_edit();
+        let before = self.rows();
+        let taken = {
+            let mut t = self.tabs.lock();
+            if t.list.len() < 2 || idx >= t.list.len() {
+                return;
+            }
+            t.take(idx)
+        };
+        taken.0.view.close();
+        self.after_tab_change(before, taken.1);
+    }
+
+    /// A page closed itself (`window.close()`): its tab goes; the last page takes the pane with it.
+    fn tab_gone(&self, id: u64) {
+        let was_active = {
+            let t = self.tabs.lock();
+            if !t.list.iter().any(|tab| tab.id == id) {
+                return;
+            }
+            t.active().id == id
+        };
+        if was_active {
+            self.cancel_edit();
+        }
+        let before = self.rows();
+        let outcome = {
+            let mut t = self.tabs.lock();
+            let Some(idx) = t.list.iter().position(|tab| tab.id == id) else { return };
+            if t.list.len() == 1 {
+                None
+            } else {
+                Some(t.take(idx).1)
+            }
+        };
+        match outcome {
+            Some(activated) => self.after_tab_change(before, activated),
+            None => {
+                self.closed.store(true, Ordering::SeqCst);
+                self.redraw();
+                self.host.prune();
+            }
+        }
+    }
+
+    /// Closes every page: the pane is going away.
+    fn close_all(&self) {
+        let views: Vec<_> = self.tabs.lock().list.iter().map(|t| Arc::clone(&t.view)).collect();
+        for view in views {
+            view.close();
+        }
+    }
+
+    /// What the control channel, the keys and the strip ask of the tabs.
+    fn tab_op(self: &Arc<Self>, op: TabOp) {
+        match op {
+            TabOp::New(url) => {
+                let edit = url.is_none();
+                let url = match url {
+                    None => DEFAULT_URL.to_string(),
+                    Some(u) => match hivegrid_web::normalize_url(&u) {
+                        Some(u) => u,
+                        None => {
+                            log::warn!("web pane {}: refused to open {u:?} in a tab", self.pane_id);
+                            return;
+                        }
+                    },
+                };
+                if self.open_tab(&url) && edit {
+                    self.begin_edit();
+                }
+            }
+            TabOp::Close => {
+                let active = self.tabs.lock().active;
+                self.close_tab(active);
+            }
+            TabOp::Next => self.switch_by(1),
+            TabOp::Prev => self.switch_by(-1),
+            TabOp::Select(n) => self.switch_to(n - 1),
+        }
+    }
+
+    /// An event of tab `tab_id`'s page. Only the active tab draws the pane; every tab can change
+    /// its title in the strip.
+    fn on_event(&self, tab_id: u64, event: WebEvent, recorder: Option<&Recorder>) {
+        let active = self.tabs.lock().is_active(tab_id);
+        match event {
+            WebEvent::Frame | WebEvent::Cursor(_) => {
+                if active {
+                    self.redraw();
+                }
+            }
+            WebEvent::State => self.redraw(),
+            WebEvent::Info => {
+                if let Some(r) = recorder {
+                    r.visited();
+                }
+                if active {
+                    // Title and URL changed: the tab and window titles follow `get_title`.
+                    self.host.notify(MuxNotification::Alert {
+                        pane_id: self.pane_id,
+                        alert: Alert::CurrentWorkingDirectoryChanged,
+                    });
+                }
+                self.redraw();
+            }
+            WebEvent::ClipboardText(text) => {
+                self.host.notify(MuxNotification::AssignClipboard {
+                    pane_id: self.pane_id,
+                    selection: ClipboardSelection::Clipboard,
+                    clipboard: Some(text),
+                });
+            }
+            WebEvent::Closed => self.tab_gone(tab_id),
         }
     }
 }
@@ -781,7 +1096,6 @@ impl HeaderCtl {
 /// `Pane::writer` of a web pane: bytes written to it are the control channel.
 struct ControlWriter {
     pane_id: PaneId,
-    view: Arc<dyn WebView>,
     host: Arc<dyn WebHost>,
     ctl: Arc<HeaderCtl>,
     parser: ApcParser,
@@ -800,9 +1114,13 @@ impl std::io::Write for ControlWriter {
                     self.ctl.begin_edit();
                     continue;
                 }
+                ApcCommand::Tab(op) => {
+                    self.ctl.tab_op(op.clone());
+                    continue;
+                }
                 _ => {}
             }
-            if let Some(text) = command.apply(&*self.view) {
+            if let Some(text) = command.apply(&*self.ctl.view()) {
                 self.host.notify(MuxNotification::AssignClipboard {
                     pane_id: self.pane_id,
                     selection: ClipboardSelection::Clipboard,
@@ -821,14 +1139,10 @@ impl std::io::Write for ControlWriter {
 pub struct WebPane {
     pane_id: PaneId,
     domain_id: DomainId,
-    view: Arc<dyn WebView>,
     host: Arc<dyn WebHost>,
-    initial_url: String,
-    /// The page closed itself (`window.close()`).
-    closed: Arc<AtomicBool>,
     killed: AtomicBool,
     placeholder: Arc<Mutex<Placeholder>>,
-    /// The header row (state, editing) and what it does to the view.
+    /// The header row and the tabs (state, editing) and what they do to the views.
     ctl: Arc<HeaderCtl>,
     writer: Mutex<ControlWriter>,
     pointer: Mutex<Pointer>,
@@ -836,7 +1150,7 @@ pub struct WebPane {
 
 impl WebPane {
     pub fn new(
-        engine: &dyn WebEngine,
+        engine: Arc<dyn WebEngine>,
         host: Arc<dyn WebHost>,
         pane_id: PaneId,
         domain_id: DomainId,
@@ -844,21 +1158,7 @@ impl WebPane {
         spawn: WebSpawn,
     ) -> Result<Self> {
         let size = normalize_size(size);
-        let closed = Arc::new(AtomicBool::new(false));
-        let output_pending = Arc::new(AtomicBool::new(false));
         let history = (!spawn.private).then(|| Arc::new(Mutex::new(load_history(&spawn.profile))));
-        let view_slot: Arc<OnceLock<std::sync::Weak<dyn WebView>>> = Arc::new(OnceLock::new());
-        let events = Events {
-            pane_id,
-            host: Arc::clone(&host),
-            closed: Arc::clone(&closed),
-            output_pending: Arc::clone(&output_pending),
-            recorder: history.as_ref().map(|h| Recorder {
-                history: Arc::clone(h),
-                view: Arc::clone(&view_slot),
-                last: Mutex::new(String::new()),
-            }),
-        };
         let cfg = WebConfig {
             chrome: browser_choice(
                 spawn.browser.as_deref(),
@@ -872,14 +1172,6 @@ impl WebPane {
                 .map(|f| f.split_whitespace().map(str::to_string).collect())
                 .unwrap_or_default(),
         };
-        let view = engine.create_view(
-            &spawn.url,
-            &cfg,
-            view_size(&size, Header::new().top_rows(size.rows)),
-            Box::new(move |event| events.handle(event)),
-        )?;
-        let _ = view_slot.set(Arc::downgrade(&view));
-
         let term = Terminal::new(
             size,
             Arc::new(config::TermConfig::new()),
@@ -890,16 +1182,20 @@ impl WebPane {
         let placeholder = Arc::new(Mutex::new(Placeholder { term, shown: None }));
         let ctl = Arc::new(HeaderCtl {
             pane_id,
-            view: Arc::clone(&view),
+            engine,
+            cfg,
             host: Arc::clone(&host),
-            output_pending,
+            output_pending: Arc::new(AtomicBool::new(false)),
             placeholder: Arc::clone(&placeholder),
             header: Mutex::new(Header::new()),
             history,
+            tabs: Mutex::new(Tabs { list: vec![], active: 0, next_id: 1, visible: true, focused: false }),
+            closed: AtomicBool::new(false),
         });
+        let first = ctl.create_tab(0, &spawn.url, view_size(&size, Header::new().top_rows(size.rows)))?;
+        ctl.tabs.lock().list.push(first);
         let writer = ControlWriter {
             pane_id,
-            view: Arc::clone(&view),
             host: Arc::clone(&host),
             ctl: Arc::clone(&ctl),
             parser: ApcParser::new(),
@@ -907,10 +1203,7 @@ impl WebPane {
         Ok(Self {
             pane_id,
             domain_id,
-            view,
             host,
-            initial_url: sanitize_display(&spawn.url, MAX_URL_CHARS),
-            closed,
             killed: AtomicBool::new(false),
             placeholder,
             ctl,
@@ -922,10 +1215,15 @@ impl WebPane {
         })
     }
 
+    /// The active tab's page.
+    fn view(&self) -> Arc<dyn WebView> {
+        self.ctl.view()
+    }
+
     /// The latest frame of the page; `None` until the first one and while the browser is
     /// down: the cell renderer then draws the placeholder.
     pub fn frame(&self) -> Option<Arc<Frame>> {
-        self.view.take_frame()
+        self.view().take_frame()
     }
 
     pub fn frame_seq(&self) -> u64 {
@@ -945,11 +1243,16 @@ impl WebPane {
     }
 
     pub fn set_visible(&self, visible: bool) {
-        self.view.set_visible(visible);
+        let view = {
+            let mut t = self.ctl.tabs.lock();
+            t.visible = visible;
+            Arc::clone(&t.active().view)
+        };
+        view.set_visible(visible);
     }
 
     pub fn state(&self) -> WebState {
-        self.view.state()
+        self.view().state()
     }
 
     fn size(&self) -> TerminalSize {
@@ -958,26 +1261,32 @@ impl WebPane {
 
     /// The placeholder terminal, brought up to date with the view.
     fn term(&self) -> MappedMutexGuard<'_, Terminal> {
-        let info = self.view.info();
+        let (titles, active) = self.ctl.tab_titles();
+        let (view, initial_url) = self.ctl.active_tab();
+        let info = view.info();
         let size = self.size();
+        let strip = usize::from(titles.len() >= 2 && size.rows > MIN_PANE_ROWS);
         let header = {
             let h = self.ctl.header.lock();
-            if h.rows(size.rows) == 1 {
-                let mut rows = vec![h.render(size.cols, &info)];
-                rows.extend(h.render_dropdown(size.cols, size.rows));
-                rows
-            } else {
-                vec![]
+            let mut rows = vec![];
+            if strip == 1 {
+                rows.push(render_strip(size.cols, &titles, active, h.hover.strip));
             }
+            let room = size.rows - strip;
+            if h.rows(room) == 1 {
+                rows.push(h.render(size.cols, &info));
+                rows.extend(h.render_dropdown(size.cols, room));
+            }
+            rows
         };
-        let lines = placeholder_lines(&self.initial_url, &info, &self.view.state());
+        let lines = placeholder_lines(&initial_url, &info, &view.state());
         let mut ph = self.placeholder.lock();
         ph.show(header, lines);
         MutexGuard::map(ph, |ph| &mut ph.term)
     }
 
     fn is_crashed(&self) -> bool {
-        matches!(self.view.state(), WebState::Crashed { .. })
+        matches!(self.view().state(), WebState::Crashed { .. })
     }
 
     fn mouse_event_at(&self, event: MouseEvent, now: Instant) -> Result<()> {
@@ -1026,7 +1335,7 @@ impl WebPane {
                 web.kind = WebMouseKind::Wheel;
                 web.dx = dx;
                 web.dy = dy;
-                self.view.mouse(web);
+                self.view().mouse(web);
             }
             return Ok(());
         }
@@ -1085,7 +1394,7 @@ impl WebPane {
             }
         }
         drop(pointer);
-        self.view.mouse(web);
+        self.view().mouse(web);
         Ok(())
     }
 
@@ -1094,7 +1403,7 @@ impl WebPane {
         let i = event.y as usize - 1;
         match event.kind {
             MouseEventKind::Move => {
-                self.ctl.set_hover(Hover { in_header: true, hit: None });
+                self.ctl.set_hover(Hover { in_header: true, ..Hover::default() });
                 self.ctl.change(|h| {
                     if let Some(e) = &mut h.edit {
                         e.select(i);
@@ -1113,15 +1422,46 @@ impl WebPane {
         }
     }
 
-    /// A pointer event on the header row.
+    /// A pointer event on the tab strip: a click picks a tab or opens a new one, the close button
+    /// or a middle click closes one.
+    fn strip_mouse(&self, size: &TerminalSize, event: &MouseEvent) {
+        let (count, active) = {
+            let t = self.ctl.tabs.lock();
+            (t.list.len(), t.active)
+        };
+        let hit = strip_layout(size.cols, count, active).hit(event.x);
+        match event.kind {
+            MouseEventKind::Move => self.ctl.set_hover(Hover { in_header: true, strip: hit, ..Hover::default() }),
+            MouseEventKind::Press => {
+                match (event.button, hit) {
+                    (MouseButton::Left, Some(StripHit::Tab(i))) => self.ctl.switch_to(i),
+                    (MouseButton::Left, Some(StripHit::Close(i)))
+                    | (MouseButton::Middle, Some(StripHit::Tab(i) | StripHit::Close(i))) => self.ctl.close_tab(i),
+                    (MouseButton::Left, Some(StripHit::New)) => self.ctl.tab_op(TabOp::New(None)),
+                    _ => {}
+                }
+                self.ctl.set_hover(Hover::default());
+            }
+            _ => {}
+        }
+    }
+
+    /// A pointer event on the tab strip or the header row (and its dropdown).
     fn header_mouse(&self, size: &TerminalSize, event: &MouseEvent) {
+        let strip = self.ctl.strip_rows(size.rows);
+        if (event.y as usize) < strip {
+            self.strip_mouse(size, event);
+            return;
+        }
+        let mut event = *event;
+        event.y -= strip as i64;
         if event.y > 0 {
-            self.dropdown_mouse(event);
+            self.dropdown_mouse(&event);
             return;
         }
         let hit = layout(size.cols).hit(event.x);
         match event.kind {
-            MouseEventKind::Move => self.ctl.set_hover(Hover { in_header: true, hit }),
+            MouseEventKind::Move => self.ctl.set_hover(Hover { in_header: true, hit, ..Hover::default() }),
             MouseEventKind::Press if matches!(event.button, MouseButton::Left) => {
                 self.ctl.click(hit)
             }
@@ -1140,9 +1480,9 @@ impl WebPane {
 
 impl Drop for WebPane {
     fn drop(&mut self) {
-        // A pane dropped without `kill` (failed spawn, mux teardown) must not leave its page.
+        // A pane dropped without `kill` (failed spawn, mux teardown) must not leave its pages.
         if !self.killed.swap(true, Ordering::SeqCst) {
-            self.view.close();
+            self.ctl.close_all();
         }
     }
 }
@@ -1201,10 +1541,10 @@ impl Pane for WebPane {
     }
 
     fn get_title(&self) -> String {
-        let info = self.view.info();
+        let info = self.view().info();
         if info.title.is_empty() {
             if info.url.is_empty() {
-                self.initial_url.clone()
+                self.ctl.initial_url()
             } else {
                 sanitize_display(&info.url, MAX_URL_CHARS)
             }
@@ -1221,7 +1561,7 @@ impl Pane for WebPane {
         if self.ctl.is_editing() {
             self.ctl.edit_insert(text, false);
         } else {
-            self.view.insert_text(text);
+            self.view().insert_text(text);
         }
         Ok(())
     }
@@ -1230,7 +1570,7 @@ impl Pane for WebPane {
         if self.ctl.is_editing() {
             self.ctl.edit_insert(text, true);
         } else {
-            self.view.insert_text(text);
+            self.view().insert_text(text);
         }
         Ok(())
     }
@@ -1257,7 +1597,7 @@ impl Pane for WebPane {
             // Reflowed text: draw it again at the next read.
             ph.shown = None;
         }
-        self.view.resize(view_size(&size, self.ctl.header.lock().top_rows(size.rows)));
+        self.view().resize(view_size(&size, self.ctl.rows()));
         Ok(())
     }
 
@@ -1274,9 +1614,14 @@ impl Pane for WebPane {
             }
             return Ok(());
         }
+        // The tab keys of a browser.
+        if let Some(op) = tab_key(&key, mods) {
+            self.ctl.tab_op(op);
+            return Ok(());
+        }
         if self.is_crashed() {
             if key == KeyCode::Enter {
-                self.view.restart();
+                self.view().restart();
             }
             return Ok(());
         }
@@ -1286,9 +1631,9 @@ impl Pane for WebPane {
         }
         if Self::is_copy_key(&key, mods) {
             // The selection text comes back as `WebEvent::ClipboardText`.
-            self.view.copy_selection();
+            self.view().copy_selection();
         }
-        self.view.key(WebKey {
+        self.view().key(WebKey {
             down: true,
             key,
             mods,
@@ -1297,10 +1642,10 @@ impl Pane for WebPane {
     }
 
     fn key_up(&self, key: KeyCode, mods: KeyModifiers) -> Result<()> {
-        if self.is_crashed() || self.ctl.is_editing() {
+        if self.is_crashed() || self.ctl.is_editing() || tab_key(&key, mods.remove_positional_mods()).is_some() {
             return Ok(());
         }
-        self.view.key(WebKey {
+        self.view().key(WebKey {
             down: false,
             key,
             mods: mods.remove_positional_mods(),
@@ -1314,7 +1659,7 @@ impl Pane for WebPane {
 
     fn mouse_leave(&self) {
         self.ctl.set_hover(Hover::default());
-        self.view.mouse(WebMouse {
+        self.view().mouse(WebMouse {
             kind: WebMouseKind::Move,
             x: -1.0,
             y: -1.0,
@@ -1336,18 +1681,23 @@ impl Pane for WebPane {
     }
 
     fn focus_changed(&self, focused: bool) {
-        self.view.set_focused(focused);
+        let view = {
+            let mut t = self.ctl.tabs.lock();
+            t.focused = focused;
+            Arc::clone(&t.active().view)
+        };
+        view.set_focused(focused);
     }
 
     fn kill(&self) {
         if !self.killed.swap(true, Ordering::SeqCst) {
-            self.view.close();
+            self.ctl.close_all();
             self.host.notify(MuxNotification::PaneOutput(self.pane_id));
         }
     }
 
     fn is_dead(&self) -> bool {
-        self.killed.load(Ordering::SeqCst) || self.closed.load(Ordering::SeqCst)
+        self.killed.load(Ordering::SeqCst) || self.ctl.closed.load(Ordering::SeqCst)
     }
 
     fn palette(&self) -> ColorPalette {
@@ -1372,13 +1722,14 @@ impl Pane for WebPane {
         let hover = self.ctl.header.lock().hover;
         if hover.in_header {
             let shape = match hover.hit {
+                _ if hover.strip.is_some() => "pointer",
                 Some(Hit::Field) => "text",
                 Some(_) => "pointer",
                 None => "default",
             };
             return Some(shape.to_string());
         }
-        self.view.cursor()
+        self.view().cursor()
     }
 
     fn is_alt_screen_active(&self) -> bool {
@@ -1386,9 +1737,10 @@ impl Pane for WebPane {
     }
 
     fn get_current_working_dir(&self, _policy: CachePolicy) -> Option<Url> {
-        let info = self.view.info();
+        let (view, initial_url) = self.ctl.active_tab();
+        let info = view.info();
         let url = if info.url.is_empty() {
-            &self.initial_url
+            &initial_url
         } else {
             &info.url
         };
@@ -1403,6 +1755,25 @@ impl Pane for WebPane {
 /// Ctrl+L: type in the address field, as in a browser.
 fn is_location_key(key: &KeyCode, mods: KeyModifiers) -> bool {
     mods == Modifiers::CTRL && matches!(key, KeyCode::Char('l') | KeyCode::Char('L') | KeyCode::Char('\u{c}'))
+}
+
+/// The tab keys of a browser: Ctrl+T new, Ctrl+W close, Ctrl+Tab / Ctrl+PageDown next,
+/// Ctrl+Shift+Tab / Ctrl+PageUp previous, Ctrl+1 to Ctrl+9 pick.
+fn tab_key(key: &KeyCode, mods: KeyModifiers) -> Option<TabOp> {
+    if mods == Modifiers::CTRL | Modifiers::SHIFT {
+        return matches!(key, KeyCode::Tab).then_some(TabOp::Prev);
+    }
+    if mods != Modifiers::CTRL {
+        return None;
+    }
+    match key {
+        KeyCode::Char('t') | KeyCode::Char('T') | KeyCode::Char('\u{14}') => Some(TabOp::New(None)),
+        KeyCode::Char('w') | KeyCode::Char('W') | KeyCode::Char('\u{17}') => Some(TabOp::Close),
+        KeyCode::Tab | KeyCode::PageDown => Some(TabOp::Next),
+        KeyCode::PageUp => Some(TabOp::Prev),
+        KeyCode::Char(c @ '1'..='9') => Some(TabOp::Select(*c as usize - '0' as usize)),
+        _ => None,
+    }
 }
 
 /// What a key does in the address field.

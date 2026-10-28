@@ -33,7 +33,7 @@ mod lifecycle_tests;
 mod urls;
 mod view;
 
-pub use apc::{ApcCommand, ApcParser, HeaderOp};
+pub use apc::{ApcCommand, ApcParser, HeaderOp, TabOp};
 pub use engine::CdpEngine;
 pub use frame::take_decode_times;
 pub use browser::profile_dir_name;

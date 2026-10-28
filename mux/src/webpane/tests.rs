@@ -106,21 +106,32 @@ impl WebView for FakeView {
 type Notify = Box<dyn Fn(WebEvent) + Send + Sync>;
 
 struct FakeEngine {
+    /// The page of the first tab; later tabs get pages of their own (`views`).
     view: Arc<FakeView>,
-    notify: Mutex<Option<Notify>>,
+    views: Mutex<Vec<Arc<FakeView>>>,
+    notifies: Mutex<Vec<Notify>>,
     created: Mutex<Vec<(String, WebConfig, ViewSize)>>,
 }
 
 impl FakeEngine {
-    fn new() -> Self {
-        Self {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
             view: Arc::new(FakeView::default()),
-            notify: Mutex::new(None),
+            views: Mutex::new(vec![]),
+            notifies: Mutex::new(vec![]),
             created: Mutex::new(vec![]),
-        }
+        })
     }
+    /// An event of the first page.
     fn emit(&self, e: WebEvent) {
-        (self.notify.lock().as_ref().expect("view created"))(e);
+        self.emit_to(0, e);
+    }
+    /// An event of the `i`th page created.
+    fn emit_to(&self, i: usize, e: WebEvent) {
+        (self.notifies.lock().get(i).expect("view created"))(e);
+    }
+    fn page(&self, i: usize) -> Arc<FakeView> {
+        self.views.lock()[i].clone()
     }
 }
 
@@ -135,8 +146,11 @@ impl WebEngine for FakeEngine {
         self.created
             .lock()
             .push((url.to_string(), cfg.clone(), size));
-        *self.notify.lock() = Some(notify);
-        let view: Arc<dyn WebView> = self.view.clone();
+        self.notifies.lock().push(notify);
+        let mut views = self.views.lock();
+        let view = if views.is_empty() { self.view.clone() } else { Arc::new(FakeView::default()) };
+        views.push(view.clone());
+        let view: Arc<dyn WebView> = view;
         Ok(view)
     }
 }
@@ -194,7 +208,7 @@ impl FakeHost {
 }
 
 struct Fixture {
-    engine: FakeEngine,
+    engine: Arc<FakeEngine>,
     host: Arc<FakeHost>,
     pane: WebPane,
 }
@@ -230,7 +244,7 @@ fn fixture_header_sized(s: TerminalSize) -> Fixture {
     let engine = FakeEngine::new();
     let host = Arc::new(FakeHost::default());
     let pane = WebPane::new(
-        &engine,
+        engine.clone(),
         host.clone(),
         7,
         3,
@@ -456,7 +470,7 @@ fn creation_passes_url_profile_and_size_to_the_engine() {
         browser: Some("/opt/b/chrome".into()),
     };
     // No pixel size: 10x20 px cells and 96 dpi are assumed.
-    let pane = WebPane::new(&engine, host, 1, 1, size(40, 10, 0, 0, 0), spawn).unwrap();
+    let pane = WebPane::new(engine.clone(), host, 1, 1, size(40, 10, 0, 0, 0), spawn).unwrap();
     let created = engine.created.lock();
     let (url, cfg, vs) = &created[0];
     assert_eq!(url, "https://e.test/");
@@ -1670,7 +1684,7 @@ fn a_private_pane_remembers_and_offers_nothing() {
     let host = Arc::new(FakeHost::default());
     let mut spawn = spawn_of("https://example.com/");
     spawn.private = true;
-    let pane = WebPane::new(&engine, host, 9, 3, size(80, 24, 800, 480, 96), spawn).unwrap();
+    let pane = WebPane::new(engine.clone(), host, 9, 3, size(80, 24, 800, 480, 96), spawn).unwrap();
     engine.view.set_info("https://teams.test/", "");
     engine.emit(WebEvent::Info);
     assert!(pane.ctl.history.is_none());
@@ -1752,4 +1766,258 @@ fn the_list_never_takes_the_whole_pane() {
     type_text(&f, "te");
     assert_eq!(f.pane.header_rows(), 3, "the header and two candidates leave one row of the four");
     assert_eq!(f.pane.view_pixel_size().1, 20);
+}
+
+// Tabs -----------------------------------------------------------------------------------------
+
+fn apc(f: &Fixture, body: &str) {
+    use std::io::Write as _;
+    f.pane.writer().write_all(format!("\x1b_hgweb;{body}\x1b\\").as_bytes()).unwrap();
+}
+
+fn ctrl(f: &Fixture, key: KeyCode) {
+    f.pane.key_down(key, KeyModifiers::CTRL).unwrap();
+}
+
+fn click_at(f: &Fixture, button: MouseButton, x: usize, y: i64) {
+    f.pane.mouse_event(mouse(MouseEventKind::Press, button, x, y, 0, 0)).unwrap();
+    f.pane.mouse_event(mouse(MouseEventKind::Release, button, x, y, 0, 0)).unwrap();
+}
+
+fn last_calls(view: &FakeView, n: usize) -> Vec<String> {
+    let c = view.calls();
+    c[c.len() - n..].to_vec()
+}
+
+fn keys_of(view: &FakeView) -> usize {
+    view.st.lock().keys.len()
+}
+
+#[test]
+fn a_second_tab_gets_a_page_and_a_strip_row_above_the_header() {
+    let f = fixture_header();
+    f.engine.page(0).set_info("https://one.test/", "First");
+    assert_eq!(f.pane.header_rows(), 1, "one tab: no strip");
+    apc(&f, "tab;new;https://b.test/");
+    assert_eq!(f.engine.views.lock().len(), 2);
+    let created = f.engine.created.lock();
+    assert_eq!(created[1].0, "https://b.test/");
+    assert_eq!(created[1].2.pixel_height, 440, "created at the size it will have: strip and header taken");
+    drop(created);
+    assert_eq!(f.pane.header_rows(), 2);
+    assert_eq!(f.pane.view_pixel_size(), (800, 440));
+    f.engine.page(1).set_info("https://b.test/", "Second");
+    let t = text_of(&f.pane);
+    assert!(t[0].contains("First") && t[0].contains("Second") && t[0].contains('+'), "{:?}", t[0]);
+    assert!(t[1].contains("https://b.test/"), "the header shows the active tab: {:?}", t[1]);
+    assert_eq!(f.pane.get_title(), "Second");
+    // The old page is hidden, the new one shown at the pane's size.
+    assert_eq!(last_calls(&f.engine.page(0), 2), ["visible false", "focused false"]);
+    assert_eq!(f.engine.page(1).calls(), ["resize 800x440@96", "visible true", "focused false"]);
+}
+
+#[test]
+fn a_new_tab_takes_over_what_the_gui_said_about_the_pane() {
+    let f = fixture_header();
+    f.pane.set_visible(false);
+    f.pane.focus_changed(true);
+    apc(&f, "tab;new;https://b.test/");
+    assert_eq!(f.engine.page(1).calls(), ["resize 800x440@96", "visible false", "focused true"]);
+    // Switching back hands the same flags to the page that returns.
+    apc(&f, "tab;prev");
+    assert_eq!(last_calls(&f.engine.page(0), 3), ["resize 800x440@96", "visible false", "focused true"]);
+    assert_eq!(last_calls(&f.engine.page(1), 2), ["visible false", "focused false"]);
+}
+
+#[test]
+fn browser_keys_open_switch_and_close_tabs_and_input_goes_to_the_active_page() {
+    let f = fixture_header();
+    ctrl(&f, KeyCode::Char('t'));
+    assert_eq!(f.engine.views.lock().len(), 2);
+    assert!(f.ctl_editing(), "Ctrl+T opens the address field of the blank page");
+    assert_eq!(f.engine.created.lock()[1].0, "about:blank");
+    press(&f, KeyCode::Escape);
+
+    f.pane.key_down(KeyCode::Tab, KeyModifiers::CTRL | KeyModifiers::SHIFT).unwrap();
+    assert_eq!(last_calls(&f.engine.page(0), 3), ["resize 800x440@96", "visible true", "focused false"]);
+    press(&f, KeyCode::Char('x'));
+    assert_eq!((keys_of(&f.engine.page(0)), keys_of(&f.engine.page(1))), (1, 0));
+
+    ctrl(&f, KeyCode::Char('2'));
+    press(&f, KeyCode::Char('y'));
+    assert_eq!((keys_of(&f.engine.page(0)), keys_of(&f.engine.page(1))), (1, 1));
+    ctrl(&f, KeyCode::PageDown);
+    press(&f, KeyCode::Char('z'));
+    assert_eq!(keys_of(&f.engine.page(0)), 2, "Ctrl+PageDown wraps to the first tab");
+    ctrl(&f, KeyCode::PageUp);
+    ctrl(&f, KeyCode::Tab);
+    press(&f, KeyCode::Char('q'));
+    assert_eq!(keys_of(&f.engine.page(0)), 3, "Ctrl+PageUp then Ctrl+Tab: back where it was");
+    // The tab keys never reach a page, neither their press nor their release.
+    f.pane.key_up(KeyCode::Char('t'), KeyModifiers::CTRL).unwrap();
+    assert_eq!((keys_of(&f.engine.page(0)), keys_of(&f.engine.page(1))), (3, 1));
+
+    ctrl(&f, KeyCode::Char('2'));
+    ctrl(&f, KeyCode::Char('w'));
+    assert_eq!(last_calls(&f.engine.page(1), 1), ["close"]);
+    assert_eq!(f.pane.header_rows(), 1, "the strip goes with the second tab");
+    assert_eq!(f.pane.view_pixel_size(), (800, 460));
+    press(&f, KeyCode::Char('a'));
+    assert_eq!(keys_of(&f.engine.page(0)), 4, "the tab on the left is active now");
+
+    // The last tab stays: closing the pane is not a tab key's business.
+    ctrl(&f, KeyCode::Char('w'));
+    assert!(!f.engine.page(0).calls().contains(&"close".to_string()));
+    assert!(!f.pane.is_dead());
+}
+
+#[test]
+fn closing_a_tab_activates_its_right_neighbour_else_the_left_one() {
+    let f = fixture_header();
+    apc(&f, "tab;new;https://b.test/");
+    apc(&f, "tab;new;https://c.test/");
+    // Tabs are [0, 1, 2] and 2 is active; pick the middle one and close it.
+    apc(&f, "tab;select;2");
+    apc(&f, "tab;close");
+    press(&f, KeyCode::Char('x'));
+    assert_eq!(keys_of(&f.engine.page(2)), 1, "the right neighbour");
+    apc(&f, "tab;close");
+    press(&f, KeyCode::Char('y'));
+    assert_eq!(keys_of(&f.engine.page(0)), 1, "no right neighbour: the left one");
+}
+
+#[test]
+fn a_page_that_closes_itself_takes_its_tab_and_only_the_last_takes_the_pane() {
+    let f = fixture_header();
+    apc(&f, "tab;new;https://b.test/");
+    apc(&f, "tab;new;https://c.test/");
+    apc(&f, "tab;select;2");
+    // A background tab goes: the active page stays the same one.
+    f.engine.emit_to(0, WebEvent::Closed);
+    press(&f, KeyCode::Char('x'));
+    assert_eq!(keys_of(&f.engine.page(1)), 1);
+    assert!(!f.pane.is_dead());
+    assert_eq!(*f.host.pruned.lock(), 0);
+    // The active one goes: its right neighbour takes over.
+    f.engine.emit_to(1, WebEvent::Closed);
+    assert_eq!(last_calls(&f.engine.page(2), 1), ["focused false"]);
+    assert_eq!(f.pane.header_rows(), 1, "back to one tab");
+    assert!(!f.pane.is_dead());
+    f.engine.emit_to(2, WebEvent::Closed);
+    assert!(f.pane.is_dead());
+    assert_eq!(*f.host.pruned.lock(), 1);
+    // A page that is not in the pane (a stale event) changes nothing.
+    f.engine.emit_to(0, WebEvent::Closed);
+    assert_eq!(*f.host.pruned.lock(), 1);
+}
+
+#[test]
+fn only_the_active_page_redraws_the_pane_and_retitles_it() {
+    let f = fixture_header();
+    apc(&f, "tab;new;https://b.test/");
+    f.host.notes.lock().clear();
+    f.engine.emit_to(0, WebEvent::Frame);
+    f.engine.emit_to(0, WebEvent::Cursor("text".into()));
+    assert!(f.host.notes.lock().is_empty(), "a hidden page draws nothing");
+    f.engine.emit_to(0, WebEvent::Info);
+    let alerts = |f: &Fixture| f.host.notes.lock().iter().filter(|n| matches!(n, MuxNotification::Alert { .. })).count();
+    assert_eq!(alerts(&f), 0, "a background title shows in the strip, not in the window title");
+    assert_eq!(f.host.notes.lock().len(), 1, "but the strip is drawn again");
+    f.engine.emit_to(1, WebEvent::Info);
+    assert_eq!(alerts(&f), 1);
+}
+
+#[test]
+fn the_strip_takes_the_pointer() {
+    let f = fixture_header();
+    f.engine.page(0).st.lock().cursor = Some("crosshair".into());
+    apc(&f, "tab;new;https://b.test/");
+    let at = |x: usize, y: i64| f.pane.mouse_event(mouse(MouseEventKind::Move, MouseButton::None, x, y, 0, 0)).unwrap();
+    at(5, 0);
+    assert_eq!(f.pane.mouse_pointer_shape().as_deref(), Some("pointer"));
+    at(70, 0);
+    assert_eq!(f.pane.mouse_pointer_shape().as_deref(), Some("default"));
+    at(30, 1);
+    assert_eq!(f.pane.mouse_pointer_shape().as_deref(), Some("text"), "row 1 is the header");
+    // The page starts below both rows: row 5 is 3 rows of page.
+    f.pane.mouse_event(mouse(MouseEventKind::Press, MouseButton::Left, 10, 5, 0, 0)).unwrap();
+    let m = f.engine.page(1).mouse();
+    assert_eq!(m.last().map(|m| (m.x, m.y)), Some((100.0, 60.0)));
+    assert!(f.engine.page(0).mouse().is_empty());
+}
+
+#[test]
+fn clicks_on_the_strip_pick_open_and_close_tabs() {
+    let f = fixture_header();
+    apc(&f, "tab;new;https://b.test/");
+    // Two tabs: 24 columns each, the close button the last three, the new-tab button 48..51.
+    click_at(&f, MouseButton::Left, 5, 0);
+    press(&f, KeyCode::Char('x'));
+    assert_eq!((keys_of(&f.engine.page(0)), keys_of(&f.engine.page(1))), (1, 0));
+    click_at(&f, MouseButton::Left, 49, 0);
+    assert_eq!(f.engine.views.lock().len(), 3);
+    assert!(f.ctl_editing());
+    press(&f, KeyCode::Escape);
+    // Tabs are [first, new, second]. A middle click closes the one under it ...
+    click_at(&f, MouseButton::Middle, 53, 0);
+    assert_eq!(last_calls(&f.engine.page(1), 1), ["close"]);
+    // ... the close button of the first one closes it, and the strip is gone with the second tab.
+    click_at(&f, MouseButton::Left, 22, 0);
+    assert_eq!(last_calls(&f.engine.page(0), 1), ["close"]);
+    assert_eq!(f.pane.header_rows(), 1);
+    // Right of the tabs is nothing; a click there closes nothing.
+    apc(&f, "tab;new;https://c.test/");
+    click_at(&f, MouseButton::Left, 70, 0);
+    assert_eq!(f.engine.views.lock().len(), 4);
+    assert_eq!(f.pane.header_rows(), 2);
+}
+
+#[test]
+fn the_control_channel_bounds_tabs_and_ignores_what_does_not_exist() {
+    let f = fixture_header();
+    apc(&f, "tab;new;javascript:alert(1)");
+    apc(&f, "tab;select;2");
+    apc(&f, "tab;next");
+    apc(&f, "tab;close");
+    assert_eq!(f.engine.views.lock().len(), 1, "a refused address opens nothing");
+    assert_eq!(f.engine.view.calls(), Vec::<String>::new(), "one tab: switching and closing do nothing");
+    for _ in 0..30 {
+        apc(&f, "tab;new;https://x.test/");
+    }
+    assert_eq!(f.engine.views.lock().len(), header::MAX_TABS);
+    apc(&f, "tab;select;99");
+    apc(&f, "tab;select;1");
+    assert_eq!(last_calls(&f.engine.page(0), 1), ["focused false"]);
+}
+
+#[test]
+fn a_pane_too_short_for_the_strip_still_has_tabs() {
+    let f = fixture_header_sized(size(80, 3, 800, 60, 96));
+    apc(&f, "tab;new;https://b.test/");
+    assert_eq!(f.pane.header_rows(), 1, "no strip below four rows: the header keeps its place");
+    apc(&f, "tab;prev");
+    press(&f, KeyCode::Char('x'));
+    assert_eq!(keys_of(&f.engine.page(0)), 1);
+    assert_eq!(text_of(&f.pane)[0].contains('+'), false);
+}
+
+#[test]
+fn navigation_commands_act_on_the_active_tab() {
+    let f = fixture_header();
+    apc(&f, "tab;new;https://b.test/");
+    apc(&f, "navigate;https://c.test/");
+    apc(&f, "back");
+    assert!(navs(&f).is_empty(), "the first page was not navigated");
+    assert_eq!(f.engine.page(1).calls().iter().filter(|c| c.starts_with("navigate") || *c == "back").count(), 2);
+}
+
+#[test]
+fn tabs_are_titled_by_page_title_then_host_then_blank() {
+    let info = |url: &str, title: &str| PageInfo { url: url.into(), title: title.into(), ..PageInfo::default() };
+    assert_eq!(tab_title(&info("https://a.test/x", "Page"), "https://z.test/"), "Page");
+    assert_eq!(tab_title(&info("https://a.test:8080/x", ""), "https://z.test/"), "a.test");
+    assert_eq!(tab_title(&info("", ""), "https://z.test/"), "z.test");
+    assert_eq!(tab_title(&info("about:blank", ""), "https://z.test/"), "New tab");
+    assert_eq!(tab_title(&info("", ""), "about:blank"), "New tab");
+    assert_eq!(tab_title(&info("data:text/html,x", ""), ""), "data:text/html,x");
 }

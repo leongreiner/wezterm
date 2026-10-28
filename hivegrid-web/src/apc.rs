@@ -29,6 +29,8 @@ pub enum ApcCommand {
     Header(HeaderOp),
     /// Start typing in the pane's address field. Pane-level.
     Location,
+    /// Open, close or switch the pane's tabs. Pane-level.
+    Tab(TabOp),
 }
 
 /// What `header;<op>` asks of the header row.
@@ -37,6 +39,35 @@ pub enum HeaderOp {
     Toggle,
     Show,
     Hide,
+}
+
+/// What `tab;<op>` asks of the pane's tabs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TabOp {
+    /// A new tab, activated: on the URL, or on a blank page with the address field open.
+    New(Option<String>),
+    /// Close the active tab (the last one is never closed this way).
+    Close,
+    Next,
+    Prev,
+    /// Activate tab N, counted from 1.
+    Select(usize),
+}
+
+fn parse_tab(arg: &str) -> Option<TabOp> {
+    let (op, rest) = match arg.split_once(';') {
+        Some((o, r)) => (o, Some(r)),
+        None => (arg, None),
+    };
+    match (op, rest) {
+        ("new", None) => Some(TabOp::New(None)),
+        ("new", Some(url)) if !url.trim().is_empty() => Some(TabOp::New(Some(url.to_string()))),
+        ("close", None) => Some(TabOp::Close),
+        ("next", None) => Some(TabOp::Next),
+        ("prev", None) => Some(TabOp::Prev),
+        ("select", Some(n)) => n.trim().parse().ok().filter(|n| (1..=99).contains(n)).map(TabOp::Select),
+        _ => None,
+    }
 }
 
 impl ApcCommand {
@@ -60,6 +91,7 @@ impl ApcCommand {
             ("copy-url", None) => Some(ApcCommand::CopyUrl),
             ("devtools", None) => Some(ApcCommand::Devtools),
             ("location", None) => Some(ApcCommand::Location),
+            ("tab", Some(a)) => parse_tab(a).map(ApcCommand::Tab),
             ("header", Some("toggle")) => Some(ApcCommand::Header(HeaderOp::Toggle)),
             ("header", Some("show")) => Some(ApcCommand::Header(HeaderOp::Show)),
             ("header", Some("hide")) => Some(ApcCommand::Header(HeaderOp::Hide)),
@@ -88,7 +120,7 @@ impl ApcCommand {
                 return (!url.is_empty()).then_some(url);
             }
             ApcCommand::Devtools => return view.devtools_url(),
-            ApcCommand::Header(_) | ApcCommand::Location => {}
+            ApcCommand::Header(_) | ApcCommand::Location | ApcCommand::Tab(_) => {}
         }
         None
     }
@@ -217,6 +249,12 @@ mod tests {
             ("hgweb;devtools", ApcCommand::Devtools),
             ("hgweb;zoom;125", ApcCommand::Zoom(125)),
             ("hgweb;location", ApcCommand::Location),
+            ("hgweb;tab;new", ApcCommand::Tab(TabOp::New(None))),
+            ("hgweb;tab;new;https://x.test/a;b", ApcCommand::Tab(TabOp::New(Some("https://x.test/a;b".into())))),
+            ("hgweb;tab;close", ApcCommand::Tab(TabOp::Close)),
+            ("hgweb;tab;next", ApcCommand::Tab(TabOp::Next)),
+            ("hgweb;tab;prev", ApcCommand::Tab(TabOp::Prev)),
+            ("hgweb;tab;select;3", ApcCommand::Tab(TabOp::Select(3))),
             ("hgweb;header;toggle", ApcCommand::Header(HeaderOp::Toggle)),
             ("hgweb;header;show", ApcCommand::Header(HeaderOp::Show)),
             ("hgweb;header;hide", ApcCommand::Header(HeaderOp::Hide)),
@@ -224,6 +262,13 @@ mod tests {
         ];
         for (body, want) in cases {
             assert_eq!(parse_all(&seq(body)), vec![want], "{body}");
+        }
+    }
+
+    #[test]
+    fn malformed_tab_commands_are_ignored() {
+        for body in ["hgweb;tab", "hgweb;tab;", "hgweb;tab;bogus", "hgweb;tab;select", "hgweb;tab;select;0", "hgweb;tab;select;x", "hgweb;tab;select;100", "hgweb;tab;new; ", "hgweb;tab;close;1", "hgweb;tab;next;1"] {
+            assert_eq!(parse_all(&seq(body)), vec![], "{body}");
         }
     }
 

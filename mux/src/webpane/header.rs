@@ -314,6 +314,8 @@ pub struct Header {
 pub struct Hover {
     pub in_header: bool,
     pub hit: Option<Hit>,
+    /// The part of the tab strip under the pointer.
+    pub strip: Option<StripHit>,
 }
 
 impl Header {
@@ -435,6 +437,90 @@ impl Header {
         }
         row.finish()
     }
+}
+
+/// Tabs a pane holds at most: each is a page of the browser.
+pub const MAX_TABS: usize = 16;
+/// Columns of the new-tab button (` + `) and of a tab's close button (` × `).
+const STRIP_BUTTON: usize = 3;
+/// A tab is never narrower than this while the strip has room (the strip scrolls instead) ...
+const TAB_MIN: usize = 10;
+/// ... nor wider than this.
+const TAB_MAX: usize = 24;
+
+/// A part of the tab strip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StripHit {
+    Tab(usize),
+    Close(usize),
+    New,
+}
+
+/// Where the tabs of the strip sit, in columns.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StripLayout {
+    /// The tabs in view: (index, columns). The close button is the last `STRIP_BUTTON` columns
+    /// of a range that is at least `TAB_MIN` wide.
+    pub tabs: Vec<(usize, Range<usize>)>,
+    pub new: Option<Range<usize>>,
+}
+
+/// The strip of `count` tabs (`active` selected) in a pane `cols` wide. Tabs share the room
+/// equally between `TAB_MIN` and `TAB_MAX` columns; with more tabs than fit, the strip shows the
+/// last ones that fit up to the active tab.
+pub fn strip_layout(cols: usize, count: usize, active: usize) -> StripLayout {
+    let count = count.max(1);
+    let new_w = if cols > 2 * STRIP_BUTTON { STRIP_BUTTON } else { 0 };
+    let room = cols.saturating_sub(new_w).max(1);
+    let shown = (room / TAB_MIN).clamp(1, count);
+    let width = (room / shown).min(TAB_MAX);
+    let first = (active + 1).saturating_sub(shown).min(count - shown);
+    let tabs = (0..shown).map(|k| (first + k, k * width..(k + 1) * width)).collect();
+    let end = shown * width;
+    let new = (new_w > 0 && end + new_w <= cols).then(|| end..end + new_w);
+    StripLayout { tabs, new }
+}
+
+impl StripLayout {
+    fn has_close(range: &Range<usize>) -> bool {
+        range.len() >= TAB_MIN
+    }
+
+    pub fn hit(&self, col: usize) -> Option<StripHit> {
+        for (i, r) in &self.tabs {
+            if r.contains(&col) {
+                return Some(if Self::has_close(r) && col >= r.end - STRIP_BUTTON { StripHit::Close(*i) } else { StripHit::Tab(*i) });
+            }
+        }
+        self.new.as_ref().filter(|r| r.contains(&col)).map(|_| StripHit::New)
+    }
+}
+
+/// The strip as escape text, exactly `cols` wide: the active tab in the colour of the field below
+/// it, the others dim, a close button on each wide enough tab and a new-tab button after the last.
+pub fn render_strip(cols: usize, titles: &[String], active: usize, hover: Option<StripHit>) -> String {
+    let lay = strip_layout(cols, titles.len(), active);
+    let mut row = Row::new(cols);
+    for (i, r) in &lay.tabs {
+        let close = StripLayout::has_close(r);
+        let area = r.len() - if close { STRIP_BUTTON } else { 0 };
+        let style = if *i == active {
+            "100"
+        } else if hover == Some(StripHit::Tab(*i)) {
+            ""
+        } else {
+            "2"
+        };
+        let text = if area >= 3 { format!(" {}", fit(&titles[*i], area - 1)) } else { String::new() };
+        row.put(area, style, &text);
+        if close {
+            row.put(STRIP_BUTTON, if hover == Some(StripHit::Close(*i)) { "1;7" } else { style }, " × ");
+        }
+    }
+    if let Some(r) = &lay.new {
+        row.put(r.len(), if hover == Some(StripHit::New) { "1;7" } else { "" }, " + ");
+    }
+    row.finish()
 }
 
 /// The start of `s` that fits `cols` columns.
@@ -690,6 +776,53 @@ mod tests {
         assert!(plain(&h.render(40, &i)).contains("↻"));
         i.loading = true;
         assert!(plain(&h.render(40, &i)).contains("✕"));
+    }
+
+    #[test]
+    fn the_strip_shares_the_width_and_scrolls_to_the_active_tab() {
+        let l = strip_layout(60, 2, 0);
+        assert_eq!(l.tabs, vec![(0, 0..24), (1, 24..48)]);
+        assert_eq!(l.new, Some(48..51));
+        assert_eq!(l.hit(0), Some(StripHit::Tab(0)));
+        assert_eq!(l.hit(20), Some(StripHit::Tab(0)));
+        assert_eq!(l.hit(21), Some(StripHit::Close(0)));
+        assert_eq!(l.hit(23), Some(StripHit::Close(0)));
+        assert_eq!(l.hit(24), Some(StripHit::Tab(1)));
+        assert_eq!(l.hit(49), Some(StripHit::New));
+        assert_eq!(l.hit(51), None);
+        // Ten columns per tab at least: 6 of 8 tabs fit in 66 columns and the active one stays in view.
+        let l = strip_layout(66, 8, 7);
+        assert_eq!(l.tabs.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![2, 3, 4, 5, 6, 7]);
+        let l = strip_layout(66, 8, 1);
+        assert_eq!(l.tabs.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![0, 1, 2, 3, 4, 5]);
+        for cols in [1, 5, 6, 7, 12, 29, 80] {
+            for count in [1, 2, 16] {
+                for active in [0, count - 1] {
+                    let l = strip_layout(cols, count, active);
+                    assert!(l.tabs.iter().any(|(i, _)| *i == active), "{cols} {count} {active}");
+                    let end = l.new.as_ref().map_or_else(|| l.tabs.last().unwrap().1.end, |n| n.end);
+                    assert!(end <= cols.max(l.tabs.len()), "{cols} {count}: {l:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_strip_row_is_exactly_the_pane_width() {
+        let titles: Vec<String> = ["First page", "日本語のタイトルがとても長いページ", "x"].map(String::from).to_vec();
+        for cols in [1, 5, 8, 20, 29, 30, 60, 80] {
+            for active in 0..3 {
+                for hover in [None, Some(StripHit::New), Some(StripHit::Close(1))] {
+                    let text = plain(&render_strip(cols, &titles, active, hover));
+                    assert_eq!(unicode_column_width(&text, None), cols, "{cols} {active}: {text:?}");
+                }
+            }
+        }
+        let text = plain(&render_strip(60, &titles[..2], 0, None));
+        assert!(text.contains("First page") && text.contains(" × ") && text.trim_end().ends_with('+'), "{text:?}");
+        // The active tab is drawn like the field below it, the others dim.
+        let raw = render_strip(60, &titles[..2], 0, None);
+        assert!(raw.find("\x1b[0;100m First").is_some() && raw.contains("\x1b[0;2m 日本語"), "{raw:?}");
     }
 
     #[test]
