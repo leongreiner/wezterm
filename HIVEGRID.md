@@ -268,8 +268,9 @@ wezterm/wezterm.
     through the same engine and `WebConfig` (profile, privacy and browser of the pane). Only the
     active tab is `set_visible` and focused; the pane's visibility and focus as the GUI last said
     them (`Tabs::visible`, `Tabs::focused`) are handed to a tab when it becomes active, and the
-    page is resized to the rows it has then. From the second tab on, row 0 is a tab strip (a pane
-    of 4 rows or more), drawn like the header by the placeholder terminal, so `header_rows()`
+    page is resized to the rows it has then. Row 0 is a tab strip (a pane of 4 rows or more, with
+    the header shown or at least two tabs: a lone tab has the `+` and no `×`, and a collapsed
+    header with one tab is a bare page; `strip_rows_for`), drawn like the header by the placeholder terminal, so `header_rows()`
     counts it and the texture starts below it; mouse events on it pick (`StripHit::Tab`), close
     (`Close`, the `×`, or a middle click) or open (`New`, the `+`). Events carry their tab: only
     the active tab's frames, cursor and `Info` alert redraw/retitle the pane (a hidden tab's

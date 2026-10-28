@@ -573,6 +573,13 @@ fn load_history(profile: &str) -> History {
     History::load(data_root().join(format!("{name}.history.json")))
 }
 
+/// Rows of the tab strip for `count` tabs in a pane `pane_rows` tall: one when the pane has room
+/// for it and there are two tabs or more, or the header is shown (so a lone tab carries the `+`).
+/// A collapsed header leaves a single tab the bare page.
+fn strip_rows_for(count: usize, header: &Header, pane_rows: usize) -> usize {
+    usize::from(pane_rows > MIN_PANE_ROWS && (count >= 2 || header.shown))
+}
+
 #[cfg(test)]
 fn load_history(_profile: &str) -> History {
     History::new()
@@ -683,10 +690,11 @@ impl HeaderCtl {
         self.tabs.lock().active().initial_url.clone()
     }
 
-    /// Rows of the tab strip in a pane `pane_rows` tall: one from the second tab on, when the
-    /// pane has room for it and a header.
+    /// Rows of the tab strip in a pane `pane_rows` tall: one when the pane has room for it and
+    /// there are two tabs or more, or the header is shown (a lone tab then carries the `+`).
     fn strip_rows(&self, pane_rows: usize) -> usize {
-        usize::from(self.tabs.lock().list.len() >= 2 && pane_rows > MIN_PANE_ROWS)
+        let count = self.tabs.lock().list.len();
+        strip_rows_for(count, &self.header.lock(), pane_rows)
     }
 
     /// Rows at the top of the pane the page does not cover: the tab strip, the header row (0 or
@@ -705,12 +713,16 @@ impl HeaderCtl {
     /// is left of the pane. The pane is drawn again either way.
     fn change<R>(&self, f: impl FnOnce(&mut Header) -> R) -> R {
         let size = self.pane_size();
-        let strip = self.strip_rows(size.rows);
+        let count = self.tabs.lock().list.len();
         let (result, before, after) = {
             let mut h = self.header.lock();
-            let before = strip + h.top_rows(size.rows - strip);
+            let rows = |h: &Header| {
+                let strip = strip_rows_for(count, h, size.rows);
+                strip + h.top_rows(size.rows - strip)
+            };
+            let before = rows(&h);
             let result = f(&mut h);
-            (result, before, strip + h.top_rows(size.rows - strip))
+            (result, before, rows(&h))
         };
         if before != after {
             self.placeholder.lock().shown = None;
@@ -860,13 +872,10 @@ impl HeaderCtl {
         Ok(Tab { id, view, initial_url: sanitize_display(url, MAX_URL_CHARS) })
     }
 
-    /// The titles of the tabs in the strip and the active index; empty with a single tab.
+    /// The titles of the tabs in the strip and the active index.
     fn tab_titles(&self) -> (Vec<String>, usize) {
         let (tabs, active) = {
             let t = self.tabs.lock();
-            if t.list.len() < 2 {
-                return (vec![], 0);
-            }
             let tabs: Vec<_> = t.list.iter().map(|t| (Arc::clone(&t.view), t.initial_url.clone())).collect();
             (tabs, t.active)
         };
@@ -916,8 +925,8 @@ impl HeaderCtl {
             (t.next_id - 1, t.list.len())
         };
         let size = self.pane_size();
-        // The strip appears with the second tab: the page starts at the size it will have.
-        let strip = usize::from(count + 1 >= 2 && size.rows > MIN_PANE_ROWS);
+        // The strip is there for the new tab: the page starts at the size it will have.
+        let strip = usize::from(size.rows > MIN_PANE_ROWS);
         let top = strip + self.header.lock().top_rows(size.rows - strip);
         let tab = match self.create_tab(id, url, view_size(&size, top)) {
             Ok(tab) => tab,
@@ -1192,7 +1201,9 @@ impl WebPane {
             tabs: Mutex::new(Tabs { list: vec![], active: 0, next_id: 1, visible: true, focused: false }),
             closed: AtomicBool::new(false),
         });
-        let first = ctl.create_tab(0, &spawn.url, view_size(&size, Header::new().top_rows(size.rows)))?;
+        let header = Header::new();
+        let strip = strip_rows_for(1, &header, size.rows);
+        let first = ctl.create_tab(0, &spawn.url, view_size(&size, strip + header.top_rows(size.rows - strip)))?;
         ctl.tabs.lock().list.push(first);
         let writer = ControlWriter {
             pane_id,
@@ -1265,9 +1276,9 @@ impl WebPane {
         let (view, initial_url) = self.ctl.active_tab();
         let info = view.info();
         let size = self.size();
-        let strip = usize::from(titles.len() >= 2 && size.rows > MIN_PANE_ROWS);
         let header = {
             let h = self.ctl.header.lock();
+            let strip = strip_rows_for(titles.len(), &h, size.rows);
             let mut rows = vec![];
             if strip == 1 {
                 rows.push(render_strip(size.cols, &titles, active, h.hover.strip));

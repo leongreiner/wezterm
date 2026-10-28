@@ -486,11 +486,11 @@ fn creation_passes_url_profile_and_size_to_the_engine() {
         *vs,
         ViewSize {
             pixel_width: 400,
-            pixel_height: 180,
+            pixel_height: 160,
             dpi: 96
         }
     );
-    assert_eq!(pane.view_pixel_size(), (400, 180));
+    assert_eq!(pane.view_pixel_size(), (400, 160));
 }
 
 #[test]
@@ -1343,7 +1343,7 @@ fn type_text(f: &Fixture, text: &str) {
 }
 
 fn header_row(f: &Fixture) -> String {
-    text_of(&f.pane)[0].clone()
+    text_of(&f.pane)[1].clone()
 }
 
 fn with_settings<R>(json: Option<&str>, run: impl FnOnce() -> R) -> R {
@@ -1373,8 +1373,8 @@ fn with_settings<R>(json: Option<&str>, run: impl FnOnce() -> R) -> R {
 #[test]
 fn the_header_takes_the_first_row_and_the_page_gets_the_rest() {
     let f = fixture_header();
-    assert_eq!(f.pane.header_rows(), 1);
-    assert_eq!(f.pane.view_pixel_size(), (800, 460));
+    assert_eq!(f.pane.header_rows(), 2, "the strip of the lone tab and the header");
+    assert_eq!(f.pane.view_pixel_size(), (800, 440));
     f.engine.view.set_info("https://example.org/x", "Example");
     let row = header_row(&f);
     assert!(row.contains("https://example.org/x"), "{:?}", row);
@@ -1390,11 +1390,11 @@ fn hiding_the_header_returns_its_row_to_the_page_and_showing_takes_it_back() {
     assert_eq!(f.pane.view_pixel_size(), (800, 480));
     assert_eq!(text_of(&f.pane)[0], "https://example.com/a?b=c", "the placeholder starts at the top");
     send(&f, "header;toggle");
-    assert_eq!((f.pane.header_rows(), f.pane.view_pixel_size()), (1, (800, 460)));
+    assert_eq!((f.pane.header_rows(), f.pane.view_pixel_size()), (2, (800, 440)));
     send(&f, "header;toggle");
     send(&f, "header;hide");
     assert_eq!(f.pane.header_rows(), 0);
-    assert_eq!(f.engine.view.calls(), vec!["resize 800x480@96", "resize 800x460@96", "resize 800x480@96"]);
+    assert_eq!(f.engine.view.calls(), vec!["resize 800x480@96", "resize 800x440@96", "resize 800x480@96"]);
 }
 
 #[test]
@@ -1402,7 +1402,7 @@ fn a_pane_too_short_for_a_header_has_none_and_gets_it_when_taller() {
     let f = fixture_header_sized(size(80, 2, 800, 40, 96));
     assert_eq!((f.pane.header_rows(), f.pane.view_pixel_size()), (0, (800, 40)));
     f.pane.resize(size(80, 10, 800, 200, 96)).unwrap();
-    assert_eq!((f.pane.header_rows(), f.pane.view_pixel_size()), (1, (800, 180)));
+    assert_eq!((f.pane.header_rows(), f.pane.view_pixel_size()), (2, (800, 160)));
 }
 
 #[test]
@@ -1410,12 +1410,12 @@ fn page_mouse_positions_start_below_the_header_and_the_header_never_reaches_the_
     let f = fixture_header();
     f.pane.mouse_event(mouse(MouseEventKind::Press, MouseButton::Left, 10, 5, 3, 4)).unwrap();
     let m = f.engine.view.mouse();
-    assert_eq!((m[0].x, m[0].y), (103.0, 84.0), "row 5 is 4 rows of page, 4 px down");
+    assert_eq!((m[0].x, m[0].y), (103.0, 64.0), "row 5 is 3 rows of page, 4 px down");
     f.pane.mouse_event(mouse(MouseEventKind::Release, MouseButton::Left, 10, 5, 3, 4)).unwrap();
     f.engine.view.st.lock().mouse.clear();
-    f.pane.mouse_event(mouse(MouseEventKind::Move, MouseButton::None, 10, 0, 3, 4)).unwrap();
-    f.pane.mouse_event(mouse(MouseEventKind::Press, MouseButton::Left, 10, 0, 3, 4)).unwrap();
-    f.pane.mouse_event(mouse(MouseEventKind::Release, MouseButton::Left, 10, 0, 3, 4)).unwrap();
+    f.pane.mouse_event(mouse(MouseEventKind::Move, MouseButton::None, 10, 1, 3, 4)).unwrap();
+    f.pane.mouse_event(mouse(MouseEventKind::Press, MouseButton::Left, 10, 1, 3, 4)).unwrap();
+    f.pane.mouse_event(mouse(MouseEventKind::Release, MouseButton::Left, 10, 1, 3, 4)).unwrap();
     assert!(f.engine.view.mouse().is_empty());
 }
 
@@ -1423,7 +1423,7 @@ fn page_mouse_positions_start_below_the_header_and_the_header_never_reaches_the_
 fn a_drag_that_leaves_the_page_over_the_header_stays_with_the_page() {
     let f = fixture_header();
     f.pane.mouse_event(mouse(MouseEventKind::Press, MouseButton::Left, 10, 5, 0, 0)).unwrap();
-    f.pane.mouse_event(mouse(MouseEventKind::Move, MouseButton::Left, 10, 0, 0, 0)).unwrap();
+    f.pane.mouse_event(mouse(MouseEventKind::Move, MouseButton::Left, 10, 1, 0, 0)).unwrap();
     let m = f.engine.view.mouse();
     assert_eq!(m.len(), 2);
     assert_eq!(m[1].y, 0.0, "clamped to the top of the page");
@@ -1433,8 +1433,8 @@ fn a_drag_that_leaves_the_page_over_the_header_stays_with_the_page() {
 fn header_buttons_drive_the_view() {
     let f = fixture_header();
     let click = |x: usize| {
-        f.pane.mouse_event(mouse(MouseEventKind::Press, MouseButton::Left, x, 0, 0, 0)).unwrap();
-        f.pane.mouse_event(mouse(MouseEventKind::Release, MouseButton::Left, x, 0, 0, 0)).unwrap();
+        f.pane.mouse_event(mouse(MouseEventKind::Press, MouseButton::Left, x, 1, 0, 0)).unwrap();
+        f.pane.mouse_event(mouse(MouseEventKind::Release, MouseButton::Left, x, 1, 0, 0)).unwrap();
     };
     click(1);
     click(4);
@@ -1457,7 +1457,7 @@ fn header_buttons_drive_the_view() {
 #[test]
 fn typing_an_address_in_the_field_opens_it() {
     let f = fixture_header();
-    f.pane.mouse_event(mouse(MouseEventKind::Press, MouseButton::Left, 30, 0, 0, 0)).unwrap();
+    f.pane.mouse_event(mouse(MouseEventKind::Press, MouseButton::Left, 30, 1, 0, 0)).unwrap();
     assert!(f.ctl_editing());
     type_text(&f, "example.org/x");
     press(&f, KeyCode::Enter);
@@ -1532,7 +1532,7 @@ fn location_on_a_hidden_header_shows_it_for_the_edit_only() {
     let f = fixture_header();
     send(&f, "header;hide");
     send(&f, "location");
-    assert_eq!((f.pane.header_rows(), f.pane.view_pixel_size()), (1, (800, 460)));
+    assert_eq!((f.pane.header_rows(), f.pane.view_pixel_size()), (1, (800, 460)), "the header alone, no strip on a collapsed lone tab");
     type_text(&f, "example.org");
     press(&f, KeyCode::Enter);
     assert_eq!((f.pane.header_rows(), f.pane.view_pixel_size()), (0, (800, 480)));
@@ -1557,13 +1557,13 @@ fn the_pointer_is_a_hand_over_buttons_and_a_text_cursor_over_the_field() {
     let f = fixture_header();
     f.engine.view.st.lock().cursor = Some("crosshair".into());
     let at = |x: usize, y: i64| f.pane.mouse_event(mouse(MouseEventKind::Move, MouseButton::None, x, y, 0, 0)).unwrap();
-    at(30, 0);
+    at(30, 1);
     assert_eq!(f.pane.mouse_pointer_shape().as_deref(), Some("text"));
-    at(7, 0);
+    at(7, 1);
     assert_eq!(f.pane.mouse_pointer_shape().as_deref(), Some("pointer"));
     at(30, 5);
     assert_eq!(f.pane.mouse_pointer_shape().as_deref(), Some("crosshair"));
-    at(7, 0);
+    at(7, 1);
     f.pane.mouse_leave();
     assert_eq!(f.pane.mouse_pointer_shape().as_deref(), Some("crosshair"));
 }
@@ -1702,14 +1702,14 @@ fn several_candidates_are_listed_under_the_field_and_push_the_page_down() {
     type_text(&f, "te");
     let rows = rows_of(&f);
     // teams.test, tesla.test, then the pages of teams.test.
-    assert_eq!(rows[1].trim(), "teams.test");
-    assert_eq!(rows[2].trim(), "tesla.test");
-    assert_eq!(rows[3].trim(), "teams.test/a");
-    assert_eq!(f.pane.header_rows(), 5, "the header and four candidates");
+    assert_eq!(rows[2].trim(), "teams.test");
+    assert_eq!(rows[3].trim(), "tesla.test");
+    assert_eq!(rows[4].trim(), "teams.test/a");
+    assert_eq!(f.pane.header_rows(), 6, "the strip, the header and four candidates");
     assert_eq!(f.pane.view_pixel_size().1, full.1 - 80, "the page gives the rows up");
     // A single candidate has no list: the inline offer is all.
     type_text(&f, "s");
-    assert_eq!(f.pane.header_rows(), 1, "tesla.test alone has no list");
+    assert_eq!(f.pane.header_rows(), 2, "tesla.test alone has no list");
     assert!(header_row(&f).contains("la.test"));
     // Leaving the field gives the rows back.
     press(&f, KeyCode::Escape);
@@ -1744,14 +1744,14 @@ fn a_click_on_a_candidate_opens_it_and_hovering_picks_it() {
     let f = fixture_with_history();
     locate(&f);
     type_text(&f, "te");
-    f.pane.mouse_event(mouse(MouseEventKind::Move, MouseButton::None, 20, 2, 0, 0)).unwrap();
+    f.pane.mouse_event(mouse(MouseEventKind::Move, MouseButton::None, 20, 3, 0, 0)).unwrap();
     assert_eq!(f.pane.ctl.header.lock().edit.as_ref().unwrap().selected(), 1);
-    f.pane.mouse_event(mouse(MouseEventKind::Press, MouseButton::Left, 20, 2, 0, 0)).unwrap();
+    f.pane.mouse_event(mouse(MouseEventKind::Press, MouseButton::Left, 20, 3, 0, 0)).unwrap();
     assert_eq!(navs(&f), vec!["navigate https://tesla.test/"]);
-    assert_eq!(f.pane.header_rows(), 1, "the list is gone");
+    assert_eq!(f.pane.header_rows(), 2, "the list is gone");
     // A click below the list is the page's.
     f.engine.view.st.lock().mouse.clear();
-    f.pane.mouse_event(mouse(MouseEventKind::Press, MouseButton::Left, 20, 5, 0, 0)).unwrap();
+    f.pane.mouse_event(mouse(MouseEventKind::Press, MouseButton::Left, 20, 8, 0, 0)).unwrap();
     assert_eq!(f.engine.view.mouse().len(), 1);
 }
 
@@ -1797,7 +1797,11 @@ fn keys_of(view: &FakeView) -> usize {
 fn a_second_tab_gets_a_page_and_a_strip_row_above_the_header() {
     let f = fixture_header();
     f.engine.page(0).set_info("https://one.test/", "First");
-    assert_eq!(f.pane.header_rows(), 1, "one tab: no strip");
+    assert_eq!(f.pane.header_rows(), 2, "one tab with a header: the strip is there for its + button");
+    send(&f, "header;hide");
+    assert_eq!(f.pane.header_rows(), 0, "one tab, header collapsed: a bare page, no strip");
+    send(&f, "header;show");
+    assert_eq!(f.pane.header_rows(), 2);
     apc(&f, "tab;new;https://b.test/");
     assert_eq!(f.engine.views.lock().len(), 2);
     let created = f.engine.created.lock();
@@ -1860,8 +1864,8 @@ fn browser_keys_open_switch_and_close_tabs_and_input_goes_to_the_active_page() {
     ctrl(&f, KeyCode::Char('2'));
     ctrl(&f, KeyCode::Char('w'));
     assert_eq!(last_calls(&f.engine.page(1), 1), ["close"]);
-    assert_eq!(f.pane.header_rows(), 1, "the strip goes with the second tab");
-    assert_eq!(f.pane.view_pixel_size(), (800, 460));
+    assert_eq!(f.pane.header_rows(), 2, "the strip stays with a lone tab");
+    assert_eq!(f.pane.view_pixel_size(), (800, 440));
     press(&f, KeyCode::Char('a'));
     assert_eq!(keys_of(&f.engine.page(0)), 4, "the tab on the left is active now");
 
@@ -1901,7 +1905,7 @@ fn a_page_that_closes_itself_takes_its_tab_and_only_the_last_takes_the_pane() {
     // The active one goes: its right neighbour takes over.
     f.engine.emit_to(1, WebEvent::Closed);
     assert_eq!(last_calls(&f.engine.page(2), 1), ["focused false"]);
-    assert_eq!(f.pane.header_rows(), 1, "back to one tab");
+    assert_eq!(f.pane.header_rows(), 2, "back to one tab: the strip stays");
     assert!(!f.pane.is_dead());
     f.engine.emit_to(2, WebEvent::Closed);
     assert!(f.pane.is_dead());
@@ -1961,15 +1965,46 @@ fn clicks_on_the_strip_pick_open_and_close_tabs() {
     // Tabs are [first, new, second]. A middle click closes the one under it ...
     click_at(&f, MouseButton::Middle, 53, 0);
     assert_eq!(last_calls(&f.engine.page(1), 1), ["close"]);
-    // ... the close button of the first one closes it, and the strip is gone with the second tab.
+    // ... the close button of the first one closes it; the lone tab left keeps its strip.
     click_at(&f, MouseButton::Left, 22, 0);
     assert_eq!(last_calls(&f.engine.page(0), 1), ["close"]);
-    assert_eq!(f.pane.header_rows(), 1);
+    assert_eq!(f.pane.header_rows(), 2);
+    // A lone tab has no close button: its old place closes nothing, it only selects the tab.
+    click_at(&f, MouseButton::Left, 22, 0);
+    assert_eq!(f.engine.views.lock().len(), 3);
+    assert!(!f.engine.page(2).calls().contains(&"close".to_string()));
     // Right of the tabs is nothing; a click there closes nothing.
     apc(&f, "tab;new;https://c.test/");
     click_at(&f, MouseButton::Left, 70, 0);
     assert_eq!(f.engine.views.lock().len(), 4);
     assert_eq!(f.pane.header_rows(), 2);
+}
+
+#[test]
+fn the_new_tab_button_of_a_lone_tab_opens_a_second_one() {
+    let f = fixture_header();
+    assert_eq!(f.pane.header_rows(), 2);
+    // One tab: 24 columns, the + button right after it, no close button.
+    click_at(&f, MouseButton::Left, 25, 0);
+    assert_eq!(f.engine.views.lock().len(), 2);
+    assert!(f.ctl_editing(), "the new tab's address field is open");
+    press(&f, KeyCode::Escape);
+    assert_eq!(f.pane.header_rows(), 2);
+    assert_eq!(f.pane.view_pixel_size(), (800, 440));
+    assert_eq!(f.engine.created.lock()[1].2.pixel_height, 440);
+}
+
+#[test]
+fn hiding_the_header_of_a_lone_tab_removes_the_strip_and_showing_brings_it_back() {
+    let f = fixture_header();
+    assert_eq!((f.pane.header_rows(), f.pane.view_pixel_size()), (2, (800, 440)));
+    send(&f, "header;hide");
+    assert_eq!((f.pane.header_rows(), f.pane.view_pixel_size()), (0, (800, 480)));
+    assert!(!text_of(&f.pane)[0].contains('+'), "no strip row on a bare page");
+    send(&f, "header;show");
+    assert_eq!((f.pane.header_rows(), f.pane.view_pixel_size()), (2, (800, 440)));
+    assert!(text_of(&f.pane)[0].contains('+'), "the strip row is back with its + button");
+    assert_eq!(f.engine.view.calls(), vec!["resize 800x480@96", "resize 800x440@96"]);
 }
 
 #[test]

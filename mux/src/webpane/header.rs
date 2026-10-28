@@ -345,7 +345,7 @@ impl Header {
     }
 
     /// The dropdown rows as escape text, each exactly `cols` wide: under the field, the selected
-    /// candidate in reverse video.
+    /// candidate on a raised slab.
     pub fn render_dropdown(&self, cols: usize, pane_rows: usize) -> Vec<String> {
         let n = self.dropdown_rows(pane_rows);
         let Some(edit) = &self.edit else { return vec![] };
@@ -354,7 +354,7 @@ impl Header {
             .map(|i| {
                 let mut row = Row::new(cols);
                 row.pad("", lay.field.start);
-                let style = if i == edit.selected() { "100;7" } else { "100" };
+                let style = if i == edit.selected() { "40;1;97" } else { "" };
                 let width = lay.field.len();
                 row.put(width, style, &format!(" {}", fit_plain(&edit.dropdown()[i].display, width.saturating_sub(2))));
                 row.finish()
@@ -363,80 +363,166 @@ impl Header {
     }
 
     /// The row as escape text for a terminal `cols` wide (home position, no line break): one
-    /// SGR run per part, exactly `cols` columns.
+    /// SGR run per part, exactly `cols` columns. The row is a raised bar (SGR 40, the colour of
+    /// the active tab above it) with the address field inset in the base colour.
     pub fn render(&self, cols: usize, info: &PageInfo) -> String {
         let lay = layout(cols);
         let mut row = Row::new(cols);
-        let button = |row: &mut Row, range: &Option<Range<usize>>, glyph: &str, on: bool, hit: Hit| {
+        let button = |row: &mut Row, range: &Option<Range<usize>>, glyph: &str, state: ButtonState, hit: Hit| {
             if let Some(range) = range {
-                let hovered = on && self.hover.hit == Some(hit);
-                let style = if hovered { "1;7" } else if on { "" } else { "2" };
+                let hovered = state != ButtonState::Off && self.hover.hit == Some(hit);
+                let style = match state {
+                    _ if hovered => HOVER,
+                    ButtonState::On => BAR,
+                    ButtonState::Busy => "40;34;1",
+                    ButtonState::Off => "40;90",
+                };
                 row.put(range.len(), style, &format!(" {glyph} "));
             }
         };
-        button(&mut row, &lay.back, "‹", info.can_go_back, Hit::Back);
-        button(&mut row, &lay.forward, "›", info.can_go_forward, Hit::Forward);
-        button(&mut row, &lay.reload, if info.loading { "✕" } else { "↻" }, true, Hit::Reload);
+        let on = |yes: bool| if yes { ButtonState::On } else { ButtonState::Off };
+        button(&mut row, &lay.back, "‹", on(info.can_go_back), Hit::Back);
+        button(&mut row, &lay.forward, "›", on(info.can_go_forward), Hit::Forward);
+        let (glyph, state) = if info.loading { ("✕", ButtonState::Busy) } else { ("↻", ButtonState::On) };
+        button(&mut row, &lay.reload, glyph, state, Hit::Reload);
 
-        // The field: one blank of padding each side, none in a field of one or two columns.
-        const FIELD: &str = "100";
+        // The field: one blank of padding each side (none in a field of one or two columns) and,
+        // in a field with room, a two column lead: what the page is (secure, loading, blank) or
+        // that the field is being typed in.
+        const FIELD: &str = "";
         let pad = usize::from(lay.field.len() >= 3);
-        let room = lay.field.len() - 2 * pad;
+        let inner = lay.field.len() - 2 * pad;
+        let lead = if inner >= LEAD_MIN_ROOM { 2 } else { 0 };
+        let room = inner - lead;
         row.put(pad, FIELD, &" ".repeat(pad));
+        if lead > 0 {
+            let (style, glyph) = if self.edit.is_some() { ("34", "⌕") } else { lead_glyph(info) };
+            row.put(lead, style, &format!("{glyph} "));
+        }
         match (&self.edit, &self.error) {
             (Some(_), Some(error)) => {
-                row.put(room, "100;31", &fit(error, room));
+                row.put(room, "31", &fit(error, room));
             }
             (Some(edit), None) => {
                 if let Some(shown) = edit.preview() {
                     // An arrow-selected candidate stands in the field.
-                    row.put(room, "100;7", &fit_plain(shown, room));
-                    row.put(pad, FIELD, &" ".repeat(pad));
-                    if let Some(range) = &lay.collapse {
-                        row.put(range.len(), if self.hover.hit == Some(Hit::Collapse) { "1;7" } else { "" }, " ▴ ");
-                    }
-                    return row.finish();
-                }
-                let (before, at, after) = edit.window(room);
-                if edit.all {
-                    let shown = format!("{before}{}{after}", at.map(String::from).unwrap_or_default());
-                    row.put(room, "100;7", &shown);
+                    row.put(room, "7", &fit_plain(shown, room));
                 } else {
-                    let start = row.used;
-                    row.push(FIELD, &before);
-                    // A completion on offer: its first character carries the caret.
-                    let ghost = match (edit.list.first(), at, after.is_empty()) {
-                        (Some(c), None, true) => fit_plain(&c.suffix, room.saturating_sub(row.used - start)),
-                        _ => String::new(),
-                    };
-                    if ghost.is_empty() {
-                        row.push("100;7", &at.map(String::from).unwrap_or_else(|| " ".into()));
-                        row.push(FIELD, &after);
+                    let (before, at, after) = edit.window(room);
+                    if edit.all {
+                        let shown = format!("{before}{}{after}", at.map(String::from).unwrap_or_default());
+                        row.put(room, "7", &shown);
                     } else {
-                        let mut chars = ghost.chars();
-                        let first: String = chars.by_ref().take(1).collect();
-                        row.push("100;7", &first);
-                        row.push("100;2", chars.as_str());
+                        let start = row.used;
+                        row.push(FIELD, &before);
+                        // A completion on offer: its first character carries the caret.
+                        let ghost = match (edit.list.first(), at, after.is_empty()) {
+                            (Some(c), None, true) => fit_plain(&c.suffix, room.saturating_sub(row.used - start)),
+                            _ => String::new(),
+                        };
+                        if ghost.is_empty() {
+                            row.push("7", &at.map(String::from).unwrap_or_else(|| " ".into()));
+                            row.push(FIELD, &after);
+                        } else {
+                            let mut chars = ghost.chars();
+                            let first: String = chars.by_ref().take(1).collect();
+                            row.push("7", &first);
+                            row.push("2", chars.as_str());
+                        }
+                        row.pad(FIELD, room.saturating_sub(row.used - start));
                     }
-                    row.pad(FIELD, room.saturating_sub(row.used - start));
                 }
             }
             (None, _) => {
                 let url = if info.url == "about:blank" { "" } else { info.url.as_str() };
                 if url.is_empty() {
-                    row.put(room, "100;2", &fit(HINT, room));
+                    row.put(room, "2", &fit(HINT, room));
                 } else {
-                    row.put(room, FIELD, &fit(url, room));
+                    put_address(&mut row, room, url);
                 }
             }
         }
         row.put(pad, FIELD, &" ".repeat(pad));
         if let Some(range) = &lay.collapse {
             let hovered = self.hover.hit == Some(Hit::Collapse);
-            row.put(range.len(), if hovered { "1;7" } else { "" }, " ▴ ");
+            row.put(range.len(), if hovered { HOVER } else { BAR }, " ▴ ");
         }
         row.finish()
     }
+}
+
+/// The header bar and the active tab above it: the raised surface.
+const BAR: &str = "40";
+/// A pressed-looking, lit button or chip under the pointer.
+const HOVER: &str = "100;1;97";
+/// A field this wide (inside its padding) has the lead glyph.
+const LEAD_MIN_ROOM: usize = 10;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ButtonState {
+    On,
+    /// Working: the stop button while a page loads.
+    Busy,
+    /// Nothing to do (no history to go back to): dim, no hover.
+    Off,
+}
+
+/// The lead glyph of the field for a page: green for https, amber for http, loading wins.
+fn lead_glyph(info: &PageInfo) -> (&'static str, &'static str) {
+    let url = info.url.as_str();
+    if info.loading {
+        return ("34", "◌");
+    }
+    if url.is_empty() || url == "about:blank" {
+        return ("2", "⌕");
+    }
+    let local = ["localhost", "127.", "[::1]"].iter().any(|h| url["http://".len().min(url.len())..].starts_with(h));
+    if url.starts_with("https://") {
+        ("32", "▪")
+    } else if url.starts_with("http://") && !local {
+        ("33", "▪")
+    } else {
+        ("2", "▪")
+    }
+}
+
+/// How many chars of `url` are its scheme (with `://`), a leading `www.` and its host (with port).
+fn address_parts(url: &[char]) -> (usize, usize, usize) {
+    let s: String = url.iter().collect();
+    let Some(at) = s.find("://") else { return (0, 0, 0) };
+    if !s[..at].chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c)) {
+        return (0, 0, 0);
+    }
+    let scheme = s[..at].chars().count() + 3;
+    let rest: Vec<char> = url[scheme..].to_vec();
+    let www = if rest.iter().take(4).collect::<String>().eq_ignore_ascii_case("www.") { 4 } else { 0 };
+    let host = rest.iter().position(|c| matches!(c, '/' | '?' | '#')).unwrap_or(rest.len());
+    (scheme, www, host.saturating_sub(www))
+}
+
+/// The page address in a field `room` wide: scheme and `www.` faint, host bright, the rest faint.
+/// An address without `scheme://` (about:, data:) is plain.
+fn put_address(row: &mut Row, room: usize, url: &str) {
+    let chars: Vec<char> = url.chars().filter(|c| !c.is_control()).collect();
+    let shown: Vec<char> = fit(&chars.iter().collect::<String>(), room).chars().collect();
+    let (scheme, www, host) = address_parts(&chars);
+    let start = row.used;
+    let mut at = 0;
+    let mut run = |row: &mut Row, len: usize, style: &str| {
+        let end = (at + len).min(shown.len());
+        if end > at {
+            row.push(style, &shown[at..end].iter().collect::<String>());
+        }
+        at = end;
+    };
+    if scheme == 0 {
+        run(row, usize::MAX / 2, "");
+    } else {
+        run(row, scheme + www, "2");
+        run(row, host, "1;97");
+        run(row, usize::MAX / 2, "2");
+    }
+    row.pad("", room.saturating_sub(row.used - start));
 }
 
 /// Tabs a pane holds at most: each is a page of the browser.
@@ -460,9 +546,11 @@ pub enum StripHit {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StripLayout {
     /// The tabs in view: (index, columns). The close button is the last `STRIP_BUTTON` columns
-    /// of a range that is at least `TAB_MIN` wide.
+    /// of a range that is at least `TAB_MIN` wide, while there is more than one tab.
     pub tabs: Vec<(usize, Range<usize>)>,
     pub new: Option<Range<usize>>,
+    /// More than one tab: the last tab stays, so a lone tab has no close button.
+    closable: bool,
 }
 
 /// The strip of `count` tabs (`active` selected) in a pane `cols` wide. Tabs share the room
@@ -478,47 +566,62 @@ pub fn strip_layout(cols: usize, count: usize, active: usize) -> StripLayout {
     let tabs = (0..shown).map(|k| (first + k, k * width..(k + 1) * width)).collect();
     let end = shown * width;
     let new = (new_w > 0 && end + new_w <= cols).then(|| end..end + new_w);
-    StripLayout { tabs, new }
+    StripLayout { tabs, new, closable: count >= 2 }
 }
 
 impl StripLayout {
-    fn has_close(range: &Range<usize>) -> bool {
-        range.len() >= TAB_MIN
+    fn has_close(&self, range: &Range<usize>) -> bool {
+        self.closable && range.len() >= TAB_MIN
     }
 
     pub fn hit(&self, col: usize) -> Option<StripHit> {
         for (i, r) in &self.tabs {
             if r.contains(&col) {
-                return Some(if Self::has_close(r) && col >= r.end - STRIP_BUTTON { StripHit::Close(*i) } else { StripHit::Tab(*i) });
+                return Some(if self.has_close(r) && col >= r.end - STRIP_BUTTON { StripHit::Close(*i) } else { StripHit::Tab(*i) });
             }
         }
         self.new.as_ref().filter(|r| r.contains(&col)).map(|_| StripHit::New)
     }
 }
 
-/// The strip as escape text, exactly `cols` wide: the active tab in the colour of the field below
-/// it, the others dim, a close button on each wide enough tab and a new-tab button after the last.
+/// The strip as escape text, exactly `cols` wide. The active tab is a raised slab in the colour of
+/// the header bar below it, so the two read as one piece; the other tabs recede (faint text on the
+/// base colour) and light up under the pointer. A tab ends in one blank base column that separates
+/// it from the next slab. Every tab leads with a dot, a close button follows on each wide enough
+/// tab (from the second tab on) and the new-tab button sits after the last tab.
 pub fn render_strip(cols: usize, titles: &[String], active: usize, hover: Option<StripHit>) -> String {
     let lay = strip_layout(cols, titles.len(), active);
     let mut row = Row::new(cols);
     for (i, r) in &lay.tabs {
-        let close = StripLayout::has_close(r);
-        let area = r.len() - if close { STRIP_BUTTON } else { 0 };
-        let style = if *i == active {
-            "100"
+        let close = lay.has_close(r);
+        let gap = usize::from(r.len() >= 4);
+        // Slab columns: the tab without its gap; the title gets what the close button leaves.
+        let area = r.len() - gap - if close { STRIP_BUTTON - gap } else { 0 };
+        let (slab, dot_style, title_style, dot) = if *i == active {
+            (BAR, "40;34", "40;1;97", "▪")
         } else if hover == Some(StripHit::Tab(*i)) {
-            ""
+            (BAR, "40;34", BAR, "◦")
         } else {
-            "2"
+            ("", "90", "2", "◦")
         };
-        let text = if area >= 3 { format!(" {}", fit(&titles[*i], area - 1)) } else { String::new() };
-        row.put(area, style, &text);
-        if close {
-            row.put(STRIP_BUTTON, if hover == Some(StripHit::Close(*i)) { "1;7" } else { style }, " × ");
+        let start = row.used;
+        // The dot is spared on a tab too narrow to give its title room.
+        if area >= 9 {
+            row.push(slab, " ");
+            row.push(dot_style, dot);
+            row.push(title_style, &format!(" {}", fit(&titles[*i], area - 3)));
+        } else if area >= 3 {
+            row.push(title_style, &format!(" {}", fit(&titles[*i], area - 1)));
         }
+        row.pad(slab, area.saturating_sub(row.used - start));
+        if close {
+            let style = if hover == Some(StripHit::Close(*i)) { HOVER } else { slab };
+            row.put(STRIP_BUTTON - gap, style, " ×");
+        }
+        row.pad("", gap);
     }
     if let Some(r) = &lay.new {
-        row.put(r.len(), if hover == Some(StripHit::New) { "1;7" } else { "" }, " + ");
+        row.put(r.len(), if hover == Some(StripHit::New) { HOVER } else { "40;34;1" }, " + ");
     }
     row.finish()
 }
@@ -770,12 +873,151 @@ mod tests {
     fn buttons_follow_the_page_state() {
         let h = Header::new();
         let mut i = info("https://x.test");
-        assert!(h.render(40, &i).contains("\x1b[0;2m ‹ "), "back is dim without history");
+        let style = |i: &PageInfo, h: &Header, col| style_at(&header_cells_of(h, 40, i), col);
+        let off = style(&i, &h, 1);
+        assert!(plain(&h.render(40, &i)).starts_with(" ‹ "));
         i.can_go_back = true;
-        assert!(!h.render(40, &i).contains("\x1b[0;2m ‹ "));
+        assert_ne!(style(&i, &h, 1), off, "back is dimmer without history");
+        assert_eq!(style(&i, &h, 4), off, "forward still has none");
         assert!(plain(&h.render(40, &i)).contains("↻"));
         i.loading = true;
         assert!(plain(&h.render(40, &i)).contains("✕"));
+        assert_ne!(style(&i, &h, 7), style(&info("https://x.test"), &h, 7), "stop stands out while loading");
+        // Hovering lights an enabled button and leaves a disabled one alone.
+        let mut hovered = Header::new();
+        hovered.hover = Hover { in_header: true, hit: Some(Hit::Back), ..Hover::default() };
+        assert_ne!(style(&i, &hovered, 1), style(&i, &h, 1));
+        assert_eq!(style(&info("https://x.test"), &hovered, 1), off);
+    }
+
+    /// The cells of a rendered row: (SGR parameters in force, glyph), one per column.
+    fn cells_of(raw: &str) -> Vec<(String, char)> {
+        let mut out = vec![];
+        let mut style = String::new();
+        let mut chars = raw.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                let mut seq = String::new();
+                for c in chars.by_ref() {
+                    if c == 'm' {
+                        break;
+                    }
+                    seq.push(c);
+                }
+                style = seq.trim_start_matches('[').trim_start_matches('0').trim_start_matches(';').to_string();
+            } else {
+                for _ in 0..char_width(c).max(1) {
+                    out.push((style.clone(), c));
+                }
+            }
+        }
+        out
+    }
+
+    fn header_cells_of(h: &Header, cols: usize, i: &PageInfo) -> Vec<(String, char)> {
+        cells_of(&h.render(cols, i))
+    }
+
+    fn header_cells(cols: usize, i: &PageInfo) -> Vec<(String, char)> {
+        header_cells_of(&Header::new(), cols, i)
+    }
+
+    fn style_at(cells: &[(String, char)], col: usize) -> String {
+        cells[col].0.clone()
+    }
+
+    /// The background of an SGR parameter list: the last 40-47 / 100-107, or none.
+    fn bg_of(style: &str) -> Option<String> {
+        style.split(';').filter(|p| matches!(p.parse::<u32>(), Ok(40..=47 | 100..=107))).last().map(String::from)
+    }
+
+    #[test]
+    fn every_row_keeps_its_width_in_every_state_from_one_to_eighty_columns() {
+        let titles: Vec<String> = ["First page", "日本語のタイトルがとても長いページ", "x", "https://a.test/a/b?c"].map(String::from).to_vec();
+        let urls = ["", "about:blank", "https://www.example.com/a/b?c=d#e", "http://localhost:3000", "data:text/html,日本語", "ftp://x"];
+        for cols in 1..=80 {
+            for url in urls {
+                for loading in [false, true] {
+                    for hit in [None, Some(Hit::Back), Some(Hit::Reload), Some(Hit::Field), Some(Hit::Collapse)] {
+                        let mut h = Header::new();
+                        h.hover = Hover { in_header: true, hit, ..Hover::default() };
+                        let i = PageInfo { url: url.into(), can_go_back: loading, loading, ..PageInfo::default() };
+                        let raw = h.render(cols, &i);
+                        assert_eq!(unicode_column_width(&plain(&raw), None), cols, "header {cols} {url:?} {loading}");
+                        assert_eq!(cells_of(&raw).len(), cols);
+                    }
+                }
+            }
+            for count in 1..=4 {
+                for active in [0, count - 1] {
+                    for hover in [None, Some(StripHit::New), Some(StripHit::Tab(0)), Some(StripHit::Close(count - 1))] {
+                        let raw = render_strip(cols, &titles[..count], active, hover);
+                        assert_eq!(unicode_column_width(&plain(&raw), None), cols, "strip {cols} {count} {active} {hover:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn what_the_strip_draws_is_where_it_hits() {
+        let titles: Vec<String> = ["First page", "Second", "Third"].map(String::from).to_vec();
+        for cols in [20, 40, 60, 80, 120] {
+            for count in 1..=3 {
+                let lay = strip_layout(cols, count, 0);
+                let cells = cells_of(&render_strip(cols, &titles[..count], 0, None));
+                for (col, (_, glyph)) in cells.iter().enumerate() {
+                    match glyph {
+                        '×' => assert_eq!(lay.hit(col), Some(StripHit::Close(lay.tabs.iter().find(|(_, r)| r.contains(&col)).unwrap().0)), "{cols} {count} {col}"),
+                        '+' => assert_eq!(lay.hit(col), Some(StripHit::New), "{cols} {count} {col}"),
+                        _ => {}
+                    }
+                }
+                assert_eq!(cells.iter().filter(|(_, g)| *g == '+').count(), 1);
+                assert_eq!(cells.iter().filter(|(_, g)| *g == '×').count(), if count > 1 { count.min(lay.tabs.len()) } else { 0 });
+            }
+        }
+    }
+
+    #[test]
+    fn what_the_header_draws_is_where_it_hits() {
+        let mut i = info("https://example.com/a");
+        i.can_go_back = true;
+        i.can_go_forward = true;
+        for cols in [30, 40, 80] {
+            let lay = layout(cols);
+            let cells = header_cells(cols, &i);
+            let glyph_hit = |g: char| cells.iter().position(|(_, c)| *c == g).map(|col| lay.hit(col));
+            assert_eq!(glyph_hit('‹'), Some(Some(Hit::Back)));
+            assert_eq!(glyph_hit('›'), Some(Some(Hit::Forward)));
+            assert_eq!(glyph_hit('↻'), Some(Some(Hit::Reload)));
+            assert_eq!(glyph_hit('▴'), Some(Some(Hit::Collapse)));
+            // The address is typed in the field, the lead glyph and the text both inside its range.
+            let text_col = cells.iter().position(|(_, c)| *c == 'e').unwrap();
+            assert_eq!(lay.hit(text_col), Some(Hit::Field));
+            // The bar is raised outside the field; inside, the field has the base background.
+            assert_ne!(bg_of(&cells[lay.field.start].0), bg_of(&cells[1].0), "the field is inset");
+            assert_eq!(bg_of(&cells[lay.field.start + 2].0), bg_of(&cells[lay.field.end - 1].0));
+        }
+    }
+
+    #[test]
+    fn the_address_shows_scheme_and_path_faint_and_the_host_bright() {
+        let url = "https://www.example.com/path?q=1";
+        let cells = header_cells(60, &info(url));
+        let text = plain(&Header::new().render(60, &info(url)));
+        let col_of = |needle: &str| text[..text.find(needle).unwrap()].chars().count();
+        let style_of = |needle: &str| style_at(&cells, col_of(needle));
+        assert_ne!(style_of("example"), style_of("https"), "the host stands out from the scheme");
+        assert_eq!(style_of("https"), style_of("www"), "www. is as faint as the scheme");
+        assert_eq!(style_of("https"), style_of("path"), "scheme and path are both muted");
+        assert!(text.contains(url), "{text:?}");
+        // An address without scheme:// is not split.
+        let url = "data:text/html,x";
+        let cells = header_cells(60, &info(url));
+        let text = plain(&Header::new().render(60, &info(url)));
+        let col = |n: &str| text[..text.find(n).unwrap()].chars().count();
+        assert_eq!(style_at(&cells, col("data")), style_at(&cells, col("html")));
     }
 
     #[test]
@@ -820,9 +1062,26 @@ mod tests {
         }
         let text = plain(&render_strip(60, &titles[..2], 0, None));
         assert!(text.contains("First page") && text.contains(" × ") && text.trim_end().ends_with('+'), "{text:?}");
-        // The active tab is drawn like the field below it, the others dim.
-        let raw = render_strip(60, &titles[..2], 0, None);
-        assert!(raw.find("\x1b[0;100m First").is_some() && raw.contains("\x1b[0;2m 日本語"), "{raw:?}");
+        // The active tab sits on the header bar's colour, the others recede, the pointer lights one up.
+        let bar = style_at(&header_cells(60, &info("https://x.test")), 1);
+        let tabs = |hover| cells_of(&render_strip(60, &titles[..2], 0, hover));
+        let (active, other) = (style_at(&tabs(None), 3), style_at(&tabs(None), 27));
+        assert_eq!(bg_of(&active), bg_of(&bar), "the active tab joins the header row");
+        assert_ne!(bg_of(&other), bg_of(&bar), "an inactive tab does not");
+        assert_ne!(style_at(&tabs(Some(StripHit::Tab(1))), 27), other, "hover lights an inactive tab");
+        assert_ne!(style_at(&tabs(Some(StripHit::New)), 49), style_at(&tabs(None), 49), "and the + button");
+        assert_ne!(style_at(&tabs(Some(StripHit::Close(1))), 45), style_at(&tabs(None), 45), "and a close button");
+    }
+
+    #[test]
+    fn a_lone_tab_has_a_new_tab_button_and_no_close_button() {
+        let l = strip_layout(60, 1, 0);
+        assert_eq!(l.tabs, vec![(0, 0..24)]);
+        assert_eq!(l.new, Some(24..27));
+        assert_eq!(l.hit(23), Some(StripHit::Tab(0)));
+        assert_eq!(l.hit(25), Some(StripHit::New));
+        let text = plain(&render_strip(60, &["Only page".to_string()], 0, None));
+        assert!(text.contains("Only page") && !text.contains('×') && text.contains(" + "), "{text:?}");
     }
 
     #[test]
