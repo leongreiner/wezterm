@@ -9,8 +9,11 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
+#[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+#[cfg(target_os = "linux")]
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -26,10 +29,16 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 const FIXED_CHROME_PATHS: &[&str] = &["/opt/google/chrome/chrome"];
 const CHROME_NAMES: &[&str] = &["google-chrome-stable", "google-chrome", "chromium", "chromium-browser"];
 
+#[cfg(target_os = "linux")]
 fn is_executable(p: &Path) -> bool {
     std::fs::metadata(p)
         .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
         .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_executable(p: &Path) -> bool {
+    std::fs::metadata(p).map(|m| m.is_file()).unwrap_or(false)
 }
 
 /// Find a Chrome binary: the configured path, `HIVEGRID_CHROME`, `/opt/google/chrome/chrome`,
@@ -203,6 +212,7 @@ pub(crate) fn chrome_args(
     a
 }
 
+#[cfg(target_os = "linux")]
 fn private_dir(path: &Path) -> Result<()> {
     std::fs::DirBuilder::new()
         .recursive(true)
@@ -235,6 +245,7 @@ impl std::fmt::Display for ExitInfo {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn describe_status(st: std::process::ExitStatus) -> String {
     if let Some(c) = st.code() {
         format!("exited with code {c}")
@@ -294,6 +305,7 @@ pub(crate) trait Launcher: Send + Sync {
 
 pub(crate) struct ChromeLauncher;
 
+#[cfg(target_os = "linux")]
 fn pipe_pair() -> Result<(OwnedFd, OwnedFd)> {
     let mut fds = [0i32; 2];
     // SAFETY: pipe2 fills `fds` on success; both ends are owned from here on.
@@ -305,6 +317,7 @@ fn pipe_pair() -> Result<(OwnedFd, OwnedFd)> {
     }
 }
 
+#[cfg(target_os = "linux")]
 /// Move `fd` above the stdio and CDP slots so the child's `dup2(.., 3|4)` cannot clobber it.
 fn lift(fd: OwnedFd) -> Result<OwnedFd> {
     // SAFETY: F_DUPFD_CLOEXEC returns a new descriptor we then own.
@@ -315,6 +328,7 @@ fn lift(fd: OwnedFd) -> Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(n) })
 }
 
+#[cfg(target_os = "linux")]
 impl Launcher for ChromeLauncher {
     fn launch(&self, cfg: &WebConfig, devtools_port: bool) -> Result<Launched> {
         let chrome = find_chrome(cfg.chrome.as_deref())?;
@@ -422,6 +436,15 @@ impl Launcher for ChromeLauncher {
             kill,
             profile_dir: Some(profile_dir),
         })
+    }
+}
+
+/// Launching a browser needs Linux (`pipe2`, `PR_SET_PDEATHSIG`, `waitid`, process groups);
+/// elsewhere the engine is never enabled and a direct call reports it.
+#[cfg(not(target_os = "linux"))]
+impl Launcher for ChromeLauncher {
+    fn launch(&self, _cfg: &WebConfig, _devtools_port: bool) -> Result<Launched> {
+        bail!("the web pane is only supported on Linux")
     }
 }
 
@@ -807,7 +830,7 @@ fn read_devtools_port(profile_dir: &Path) -> Option<u16> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use std::fs;

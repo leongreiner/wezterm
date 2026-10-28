@@ -19,6 +19,8 @@
 //! Chrome's stderr goes to `<data_root>/profile-<name>.log` (rewritten per launch).
 
 pub mod apc;
+// Everything that launches Chrome is Linux-only; elsewhere its helpers have no caller.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod browser;
 mod cdp;
 mod engine;

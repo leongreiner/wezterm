@@ -681,7 +681,9 @@ fn setup_mux(
 ) -> anyhow::Result<Arc<Mux>> {
     let mux = Arc::new(mux::Mux::new(Some(local_domain.clone())));
     Mux::set_mux(&mux);
-    // Hivegrid: only the GUI hosts web panes (the mux server never enables an engine).
+    // Hivegrid: only the GUI hosts web panes (the mux server never enables an engine), and only
+    // on Linux: the browser launcher needs Linux process APIs. Elsewhere web panes are refused.
+    #[cfg(target_os = "linux")]
     mux::webpane::enable(Arc::new(hivegrid_web::CdpEngine::new()));
     let client_id = Arc::new(mux::client::ClientId::new());
     mux.register_client(client_id.clone());
