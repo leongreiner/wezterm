@@ -2114,6 +2114,7 @@ impl TermWindow {
             if let Some(lua) = lua {
                 let tabs = lua.create_sequence_from(tabs.clone().into_iter())?;
                 let panes = lua.create_sequence_from(panes.clone().into_iter())?;
+                let cfg = config::lua::config_to_lua(&lua, &self.config)?;
 
                 let v = config::lua::emit_sync_callback(
                     &*lua,
@@ -2124,7 +2125,7 @@ impl TermWindow {
                             active_pane.clone(),
                             tabs,
                             panes,
-                            (*self.config).clone(),
+                            cfg,
                         ),
                     ),
                 )?;

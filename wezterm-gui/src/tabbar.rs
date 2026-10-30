@@ -105,6 +105,7 @@ fn call_format_tab_title(
         if let Some(lua) = lua {
             let tabs = lua.create_sequence_from(tab_info.iter().cloned())?;
             let panes = lua.create_sequence_from(pane_info.iter().cloned())?;
+            let cfg = config::lua::config_to_lua(&lua, config)?;
 
             let v = config::lua::emit_sync_callback(
                 &*lua,
@@ -114,7 +115,7 @@ fn call_format_tab_title(
                         tab.clone(),
                         tabs,
                         panes,
-                        (**config).clone(),
+                        cfg,
                         hover,
                         tab_max_width,
                     ),

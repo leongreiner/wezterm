@@ -792,6 +792,36 @@ pub async fn emit_event<'lua>(
     }
 }
 
+/// The config the Lua table in the registry was built from. Held so that its address, the
+/// cache key, cannot be reused by another config while the table is cached.
+struct CachedConfigTable(std::sync::Arc<Config>);
+
+static LUA_REGISTRY_CONFIG_TABLE: &str = "wezterm-config-table";
+
+/// `config` as the Lua table that event callbacks (format-tab-title, format-window-title)
+/// receive. Converting the whole Config walks every field and key binding, and those
+/// callbacks run on the GUI thread for every tab on every title update, so the table is built
+/// once per config and shared; callbacks must treat it as read-only. Keyed by the config
+/// itself, not its generation: config overrides share their parent's generation.
+pub fn config_to_lua<'lua>(
+    lua: &'lua Lua,
+    config: &crate::ConfigHandle,
+) -> mlua::Result<Value<'lua>> {
+    let hit = lua
+        .app_data_ref::<CachedConfigTable>()
+        .map_or(false, |c| std::sync::Arc::ptr_eq(&c.0, &config.config));
+    if hit {
+        let table: Value = lua.named_registry_value(LUA_REGISTRY_CONFIG_TABLE)?;
+        if !matches!(table, Value::Nil) {
+            return Ok(table);
+        }
+    }
+    let table = to_lua(lua, (*config.config).clone())?;
+    lua.set_named_registry_value(LUA_REGISTRY_CONFIG_TABLE, table.clone())?;
+    lua.set_app_data(CachedConfigTable(std::sync::Arc::clone(&config.config)));
+    Ok(table)
+}
+
 pub fn emit_sync_callback<'lua, A>(
     lua: &'lua Lua,
     (name, args): (String, A),
@@ -866,6 +896,32 @@ pub fn add_to_config_reload_watch_list<'lua>(
 mod test {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn config_table_is_built_once_per_config() -> anyhow::Result<()> {
+        let lua = make_lua_context(Path::new("testing"))?;
+        let a = crate::ConfigHandle::default_config();
+        let mut other = Config::default_config();
+        other.scrollback_lines = 123;
+        let b = crate::ConfigHandle {
+            config: Arc::new(other),
+            generation: a.generation(),
+        };
+
+        let first = config_to_lua(&lua, &a)?;
+        let again = config_to_lua(&lua, &a.clone())?;
+        assert!(first.equals(&again)?, "the same config reuses its table");
+
+        // A config with the same generation but other contents (a window's overrides) must
+        // not get the cached table.
+        let other = config_to_lua(&lua, &b)?;
+        assert!(!first.equals(&other)?);
+        match other {
+            Value::Table(t) => assert_eq!(t.get::<_, i64>("scrollback_lines")?, 123),
+            v => panic!("expected a table, got {}", v.type_name()),
+        }
+        Ok(())
+    }
 
     #[test]
     fn can_register_and_emit_multiple_events() -> anyhow::Result<()> {
