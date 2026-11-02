@@ -3,7 +3,7 @@
 
 use hivegrid_web::{
     CdpEngine, Frame, ViewSize, WebConfig, WebEngine, WebEvent, WebKey, WebMouse, WebMouseKind,
-    WebState, WebView,
+    WebState, WebTheme, WebView,
 };
 use parking_lot::Mutex;
 use std::io::{Read, Write};
@@ -107,6 +107,7 @@ impl Rig {
             private,
             data_root: self.root.path().join("web"),
             extra_flags: vec![],
+            theme: Default::default(),
         }
     }
 
@@ -350,6 +351,44 @@ fn evaluates_in_the_page_and_round_trips_the_selection() {
     eventually("loaded", || !v.info().loading);
     v.copy_selection();
     eventually("selection text", || events.0.lock().contains(&WebEvent::ClipboardText("hello world".into())));
+    v.close();
+}
+
+#[test]
+fn pages_see_the_theme_scheme_and_about_blank_is_dark_not_white() {
+    let chrome = need_chrome!();
+    let rig = Rig::new(chrome);
+    // The title is what the page's own matchMedia answers, after load and after a navigation.
+    let page = "data:text/html,<script>document.title=matchMedia('(prefers-color-scheme: dark)').matches?'dark':matchMedia('(prefers-color-scheme: light)').matches?'light':'none'</script>";
+    for (theme, want) in [(WebTheme::Dark, "dark"), (WebTheme::Light, "light")] {
+        let cfg = WebConfig { theme, ..rig.cfg(&format!("theme-{want}"), false) };
+        let v = rig
+            .engine
+            .create_view(page, &cfg, ViewSize { pixel_width: 300, pixel_height: 200, dpi: 96 }, Box::new(|_| {}))
+            .unwrap();
+        running(&v);
+        eventually("page answered matchMedia", || v.info().title == want);
+        v.navigate("data:text/html,<title>x</title>");
+        eventually("navigated", || v.info().title == "x");
+        v.navigate(page);
+        eventually("scheme kept across navigations", || v.info().title == want);
+        v.close();
+    }
+    // Under the dark scheme the empty page is dark from the first frame on (never a white flash).
+    let cfg = WebConfig { theme: WebTheme::Dark, ..rig.cfg("theme-bg", false) };
+    let v = rig
+        .engine
+        .create_view("about:blank", &cfg, ViewSize { pixel_width: 300, pixel_height: 200, dpi: 96 }, Box::new(|_| {}))
+        .unwrap();
+    running(&v);
+    v.resize(ViewSize { pixel_width: 320, pixel_height: 200, dpi: 96 });
+    // Chrome paints the empty page of a dark scheme itself (#121212); what matters is it is not white.
+    eventually("about:blank is dark, not white", || {
+        v.take_frame().is_some_and(|f| {
+            let px = &f.rgba[((100 * f.width + 150) * 4) as usize..][..3];
+            px.iter().all(|c| *c < 0x30)
+        })
+    });
     v.close();
 }
 

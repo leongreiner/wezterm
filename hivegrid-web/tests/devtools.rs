@@ -38,6 +38,7 @@ fn devtools_url_is_offered_only_with_the_opt_in() {
         private: false,
         data_root: root.path().join("web"),
         extra_flags: vec![],
+        theme: Default::default(),
     };
     let size = ViewSize { pixel_width: 300, pixel_height: 200, dpi: 96 };
     let wait_running = |v: &std::sync::Arc<dyn hivegrid_web::WebView>| {

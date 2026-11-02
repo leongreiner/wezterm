@@ -25,7 +25,7 @@ use crate::{Mux, MuxNotification};
 use anyhow::{anyhow, Result};
 use config::keyassignment::ScrollbackEraseMode;
 use hivegrid_web::{
-    sanitize_display, ApcParser, Frame, PageInfo, MAX_TITLE_CHARS, MAX_URL_CHARS, ViewSize, WebConfig, WebEngine, WebEvent, WebKey, WebMouse,
+    sanitize_display, ApcParser, Frame, PageInfo, MAX_TITLE_CHARS, MAX_URL_CHARS, ViewSize, WebConfig, WebEngine, WebTheme, WebEvent, WebKey, WebMouse,
     WebMouseKind, WebState, WebView,
 };
 use parking_lot::{MappedMutexGuard, Mutex, MutexGuard};
@@ -270,6 +270,21 @@ fn search_from_settings(json: Option<&str>) -> Option<String> {
             .filter(|t| t.contains("%s") && (t.starts_with("http://") || t.starts_with("https://")))
             .map(str::to_string),
     }
+}
+
+/// `web.theme` of the settings file: `dark` (also for a missing file, key or an unknown value),
+/// `light` or `system`. The Lua and Python readers agree (`config/settings.lua`).
+fn settings_theme() -> WebTheme {
+    let path = settings_file_in(std::env::var_os("HIVEGRID_SETTINGS"), &config::HOME_DIR);
+    theme_from_settings(std::fs::read_to_string(path).ok().as_deref())
+}
+
+fn theme_from_settings(json: Option<&str>) -> WebTheme {
+    json.and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok())
+        .as_ref()
+        .and_then(|v| v.get("web")?.get("theme")?.as_str())
+        .and_then(WebTheme::parse)
+        .unwrap_or_default()
 }
 
 /// The refusal for domains that cannot host a web pane (SSH, mux client): called first thing in
@@ -1180,6 +1195,7 @@ impl WebPane {
             extra_flags: std::env::var(ENV_FLAGS)
                 .map(|f| f.split_whitespace().map(str::to_string).collect())
                 .unwrap_or_default(),
+            theme: settings_theme(),
         };
         let term = Terminal::new(
             size,

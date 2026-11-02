@@ -421,6 +421,7 @@ fn main() {
         private: false,
         data_root: dir.path().join("data"),
         extra_flags: args.flags.clone(),
+        theme: Default::default(),
     };
     let engine = CdpEngine::new();
     println!(

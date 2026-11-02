@@ -36,6 +36,7 @@ impl Harness {
             private,
             data_root: std::path::PathBuf::from("/nonexistent"),
             extra_flags: vec![],
+            theme: Default::default(),
         }
     }
 
@@ -140,6 +141,58 @@ fn starts_in_starting_then_streams_frames_for_the_requested_size() {
     let pos = |m: &str| order.iter().position(|x| x == m).unwrap();
     assert!(pos("Page.enable") < pos("Page.startScreencast"));
     assert!(pos("Page.startScreencast") < pos("Page.navigate"));
+}
+
+fn media_calls(c: &FakeChrome) -> Vec<serde_json::Value> {
+    session_cmds(c, "Emulation.setEmulatedMedia")
+}
+
+#[test]
+fn every_page_is_told_the_theme_scheme_dark_by_default_light_on_request_none_for_system() {
+    for (theme, want) in [
+        (WebTheme::Dark, Some("dark")),
+        (WebTheme::Light, Some("light")),
+        (WebTheme::System, None),
+    ] {
+        let h = Harness::new();
+        let cfg = WebConfig { theme, ..h.cfg("main", false) };
+        let (a, _) = h.open_with("a.example", cfg.clone());
+        wait_running(&a);
+        let (b, _) = h.open_with("b.example", cfg);
+        wait_running(&b);
+        let c = h.launcher.chrome(0);
+        // Each page target (session) gets its own call, before it navigates; none for system.
+        eventually("both pages configured", || media_calls(&c).len() == want.map_or(0, |_| 2) && c.count("Page.navigate") >= 2);
+        let calls = media_calls(&c);
+        for p in &calls {
+            assert_eq!(p["features"], json!([{"name": "prefers-color-scheme", "value": want.unwrap()}]), "{theme:?}");
+        }
+        let sessions: std::collections::HashSet<_> =
+            c.all("Emulation.setEmulatedMedia").into_iter().map(|c| c.session).collect();
+        assert_eq!(sessions.len(), calls.len(), "one call per page session");
+        if want.is_some() {
+            let order: Vec<String> = c.commands().into_iter().map(|c| c.method).collect();
+            let first = |m: &str| order.iter().position(|x| x == m).unwrap();
+            assert!(first("Emulation.setEmulatedMedia") < first("Page.navigate"), "before the first load");
+        }
+        a.close();
+        b.close();
+    }
+}
+
+#[test]
+fn a_restarted_or_revived_view_gets_the_scheme_again() {
+    let h = Harness::new();
+    let (v, _) = h.running("a.example", "main");
+    let c = h.launcher.chrome(0);
+    assert_eq!(media_calls(&c).len(), 1);
+    v.restart();
+    eventually("new target emulated", || media_calls(&c).len() == 2);
+    c.crash("killed by signal 9 (SIGKILL)");
+    eventually("crashed", || crashed_reason(&v).is_some());
+    v.restart();
+    wait_running(&v);
+    assert_eq!(media_calls(&h.launcher.chrome(1)).len(), 1, "the new browser's page is emulated too");
 }
 
 #[test]

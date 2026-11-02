@@ -283,9 +283,9 @@ fn expected_frame(size: ViewSize, zoom: u32, browser_scale: f64, t: Tuning) -> (
     )
 }
 
-/// `Emulation.setEmulatedMedia` params that make pages see `prefers-color-scheme: dark`.
-fn dark_media_params() -> Value {
-    json!({"features": [{"name": "prefers-color-scheme", "value": "dark"}]})
+/// `Emulation.setEmulatedMedia` params that make pages see `prefers-color-scheme: <scheme>`.
+fn color_scheme_params(scheme: &str) -> Value {
+    json!({"features": [{"name": "prefers-color-scheme", "value": scheme}]})
 }
 
 fn metrics_params(size: ViewSize, zoom: u32) -> Value {
@@ -1130,8 +1130,12 @@ impl Worker {
             json!({"source": CURSOR_JS, "runImmediately": true}),
             s,
         );
-        // Dark by default: pages that honour `prefers-color-scheme` render their dark theme.
-        conn.notify("Emulation.setEmulatedMedia", dark_media_params(), s);
+        // Dark by default (`WebTheme`): pages that honour `prefers-color-scheme` render that
+        // variant. Per page target, so every view and every reattach gets it; it survives
+        // navigations. `System` sends nothing: the browser's own preference applies.
+        if let Some(scheme) = core.cfg.theme.scheme() {
+            conn.notify("Emulation.setEmulatedMedia", color_scheme_params(scheme), s);
+        }
         conn.notify("Emulation.setDeviceMetricsOverride", metrics_params(d.size, d.zoom), s);
         conn.notify(
             "Emulation.setFocusEmulationEnabled",

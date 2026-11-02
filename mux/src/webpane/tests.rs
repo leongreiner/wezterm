@@ -2056,3 +2056,16 @@ fn tabs_are_titled_by_page_title_then_host_then_blank() {
     assert_eq!(tab_title(&info("", ""), "about:blank"), "New tab");
     assert_eq!(tab_title(&info("data:text/html,x", ""), ""), "data:text/html,x");
 }
+
+#[test]
+fn the_web_theme_is_dark_unless_the_settings_say_light_or_system() {
+    use hivegrid_web::WebTheme::*;
+    assert_eq!(theme_from_settings(None), Dark);
+    assert_eq!(theme_from_settings(Some("not json")), Dark);
+    assert_eq!(theme_from_settings(Some(r#"{"web":{"links":"pane"}}"#)), Dark);
+    assert_eq!(theme_from_settings(Some(r#"{"web":{"theme":"light"}}"#)), Light);
+    assert_eq!(theme_from_settings(Some(r#"{"web":{"theme":"system"}}"#)), System);
+    assert_eq!(theme_from_settings(Some(r#"{"web":{"theme":"dark"}}"#)), Dark);
+    assert_eq!(theme_from_settings(Some(r#"{"web":{"theme":"Light"}}"#)), Dark);
+    assert_eq!(theme_from_settings(Some(r#"{"web":{"theme":3}}"#)), Dark);
+}

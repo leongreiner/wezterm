@@ -62,6 +62,40 @@ impl std::fmt::Debug for Frame {
     }
 }
 
+/// The colour scheme web pages are shown in (`web.theme` of the settings). The browser's own
+/// preference is never consulted for `Dark` and `Light`: the scheme is emulated per page
+/// (`Emulation.setEmulatedMedia`), so pages that honour `prefers-color-scheme` pick that variant.
+/// No page is inverted or force-darkened.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WebTheme {
+    #[default]
+    Dark,
+    Light,
+    /// No emulation: whatever the browser itself reports.
+    System,
+}
+
+impl WebTheme {
+    /// `"dark"`, `"light"` or `"system"`; anything else is `None`.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "dark" => Some(Self::Dark),
+            "light" => Some(Self::Light),
+            "system" => Some(Self::System),
+            _ => None,
+        }
+    }
+
+    /// The `prefers-color-scheme` value to emulate, `None` for no emulation.
+    pub fn scheme(self) -> Option<&'static str> {
+        match self {
+            Self::Dark => Some("dark"),
+            Self::Light => Some("light"),
+            Self::System => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct WebConfig {
     /// Browser binary the spawn command or the Settings asked for (`mux::webpane::browser_choice`
@@ -79,6 +113,8 @@ pub struct WebConfig {
     pub data_root: PathBuf,
     /// Extra Chrome command line flags, appended after the defaults (e.g. `--no-sandbox`).
     pub extra_flags: Vec<String>,
+    /// Colour scheme of the pages of this view.
+    pub theme: WebTheme,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
