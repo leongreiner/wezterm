@@ -188,6 +188,8 @@ wezterm/wezterm.
     `HIVEGRID_WEB_FLAGS` wins), because `HeadlessChrome` and `navigator.webdriver` get a page
     refused. The DevTools pipe is still read as automation by Google's sign-in: `bin/hivegrid-web-signin`
     signs in in a plain Chrome window on the profile instead.
+    Pages see `prefers-color-scheme: dark` (`Emulation.setEmulatedMedia` on every page), so sites
+    that follow the system theme render dark; a site without a dark theme is left as it is.
     Other knobs: `HIVEGRID_WEB_QUALITY`, `HIVEGRID_WEB_SCALE`,
     `HIVEGRID_WEB_DEVTOOLS` (see Security below, and `hivegrid-web/src/lib.rs`).
   - Security notes for the web pane:

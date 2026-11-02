@@ -126,6 +126,8 @@ fn starts_in_starting_then_streams_frames_for_the_requested_size() {
     assert_eq!((create["width"].as_f64(), create["height"].as_f64()), (Some(200.0), Some(100.0)));
     let metrics = c.last("Emulation.setDeviceMetricsOverride").unwrap().params;
     assert_eq!(metrics["deviceScaleFactor"], 1.0);
+    let media = c.last("Emulation.setEmulatedMedia").unwrap().params;
+    assert_eq!(media["features"], json!([{"name": "prefers-color-scheme", "value": "dark"}]), "pages see dark mode");
     let sc = c.last("Page.startScreencast").unwrap().params;
     assert_eq!((sc["format"].clone(), sc["maxWidth"].clone(), sc["maxHeight"].clone()), (json!("jpeg"), json!(200), json!(100)));
     assert_eq!(c.last("Page.navigate").unwrap().params["url"], "https://example.com");

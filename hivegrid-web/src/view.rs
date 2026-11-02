@@ -283,6 +283,11 @@ fn expected_frame(size: ViewSize, zoom: u32, browser_scale: f64, t: Tuning) -> (
     )
 }
 
+/// `Emulation.setEmulatedMedia` params that make pages see `prefers-color-scheme: dark`.
+fn dark_media_params() -> Value {
+    json!({"features": [{"name": "prefers-color-scheme", "value": "dark"}]})
+}
+
 fn metrics_params(size: ViewSize, zoom: u32) -> Value {
     let (w, h, dsf) = css_size(size, zoom);
     json!({"width": w, "height": h, "deviceScaleFactor": dsf, "mobile": false})
@@ -1125,6 +1130,8 @@ impl Worker {
             json!({"source": CURSOR_JS, "runImmediately": true}),
             s,
         );
+        // Dark by default: pages that honour `prefers-color-scheme` render their dark theme.
+        conn.notify("Emulation.setEmulatedMedia", dark_media_params(), s);
         conn.notify("Emulation.setDeviceMetricsOverride", metrics_params(d.size, d.zoom), s);
         conn.notify(
             "Emulation.setFocusEmulationEnabled",
