@@ -2,7 +2,24 @@ use crate::termwindow::render::TripleLayerQuadAllocator;
 use crate::termwindow::{UIItem, UIItemType};
 use mux::pane::Pane;
 use mux::tab::{PositionedSplit, SplitDirection};
+use std::str::FromStr;
 use std::sync::Arc;
+use window::color::LinearRgba;
+use wezterm_term::color::SrgbaTuple;
+
+/// The user var a program or the config sets on a pane (`OSC 1337 SetUserVar`) to colour the
+/// edge of the pane: `#rrggbb`. Hivegrid's `agentstatus.lua` sets it from the agent's state.
+pub const EDGE_VAR: &str = "hivegrid_edge";
+
+/// The colour a `hivegrid_edge` value names: exactly `#rrggbb`, anything else is no edge.
+pub fn edge_color(value: &str) -> Option<LinearRgba> {
+    let hex = value.strip_prefix('#')?;
+    if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let c = SrgbaTuple::from_str(value).ok()?;
+    Some(c.to_linear())
+}
 
 impl crate::TermWindow {
     /// True for a vertical divider whose left neighbour is a pane that set the user var
@@ -139,6 +156,57 @@ impl crate::TermWindow {
 }
 
 impl crate::TermWindow {
+    /// A coloured frame over the edge of every pane that has the user var `hivegrid_edge`
+    /// (`#rrggbb`), drawn after the dividers so the two halves of a divider keep the colours of
+    /// the two panes beside it. The strips lie inside the pane's background rectangle, which
+    /// reaches half a divider cell into each divider and the window edge on an outer side, and
+    /// are not dimmed with the pane (`inactive_pane_hsb`).
+    pub fn paint_pane_edges(&mut self, layers: &mut TripleLayerQuadAllocator) -> anyhow::Result<()> {
+        let panes = self.get_panes_to_render();
+        if !panes
+            .iter()
+            .any(|p| p.pane.copy_user_vars().contains_key(EDGE_VAR))
+        {
+            return Ok(());
+        }
+        let cell_width = self.render_metrics.cell_size.width as f32;
+        let border = self.get_os_border();
+        let tab_bar = if self.show_tab_bar && !self.config.tab_bar_at_bottom {
+            self.tab_bar_pixel_height()?
+        } else {
+            0.
+        };
+        let (padding_left, padding_top) = self.padding_left_top();
+        let top_pixel_y = tab_bar + border.top.get() as f32 + padding_top;
+        for pos in &panes {
+            let vars = pos.pane.copy_user_vars();
+            let Some(color) = vars.get(EDGE_VAR).and_then(|v| edge_color(v)) else {
+                continue;
+            };
+            let r = self.pane_background_rect(
+                pos,
+                padding_left,
+                padding_top,
+                top_pixel_y,
+                border.left.get() as f32,
+            );
+            let t = (cell_width / 4.0)
+                .round()
+                .max(2.0)
+                .min(r.size.width / 2.0)
+                .min(r.size.height / 2.0);
+            for strip in [
+                euclid::rect(r.min_x(), r.min_y(), r.size.width, t),
+                euclid::rect(r.min_x(), r.max_y() - t, r.size.width, t),
+                euclid::rect(r.min_x(), r.min_y() + t, t, r.size.height - 2.0 * t),
+                euclid::rect(r.max_x() - t, r.min_y() + t, t, r.size.height - 2.0 * t),
+            ] {
+                self.filled_rectangle(layers, 2, strip, color)?;
+            }
+        }
+        Ok(())
+    }
+
     /// While a pane is dragged (config `pane_drag_modifiers`): the dragged pane is veiled
     /// and the drop target is outlined in the cursor colour, filled all over for a swap
     /// (centre) or only over the half the pane would take for an edge drop.
@@ -204,5 +272,19 @@ impl crate::TermWindow {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::edge_color;
+
+    #[test]
+    fn edge_value_is_exactly_a_hex_colour() {
+        assert!(edge_color("#4ade80").is_some());
+        assert!(edge_color("#A78BFA").is_some());
+        for bad in ["", "4ade80", "#4ade8", "#4ade800", "#4adg80", "green", "rgb(1,2,3)"] {
+            assert!(edge_color(bad).is_none(), "{bad:?} must not be an edge colour");
+        }
     }
 }

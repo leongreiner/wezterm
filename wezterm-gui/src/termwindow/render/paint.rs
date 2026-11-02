@@ -269,6 +269,8 @@ impl crate::TermWindow {
             }
         }
 
+        self.paint_pane_edges(&mut layers)
+            .context("paint_pane_edges")?;
         self.paint_pane_drag(&mut layers).context("paint_pane_drag")?;
 
         if self.show_tab_bar {

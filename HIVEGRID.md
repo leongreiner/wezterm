@@ -19,6 +19,13 @@ wezterm/wezterm.
   restores the default; a comma separated list is a fallback list of CSS cursor names). The
   shape applies while the pointer is over that pane and the pane has mouse reporting on.
   Stock WezTerm ignores the sequence. The explorer uses it for the column borders.
+- Pane edge: a pane that sets the user var `hivegrid_edge` to `#rrggbb` (anything else is ignored) gets a
+  coloured frame over its edge, a quarter of a cell wide (at least 2 px), drawn after the dividers inside the
+  pane's background rectangle (which reaches half a divider cell into each divider and to the window edge
+  on an outer side), so two neighbours keep their own colours on the two halves of the divider between
+  them. It is not dimmed with an inactive pane (`inactive_pane_hsb`). The Lua side (`config/agentstatus.lua`)
+  sets the var from the agent's state: the colour of needs you, limit and done, nothing for every other
+  state. Stock WezTerm ignores the var.
 - Hover for panes without focus: mouse motion goes to the pane under the pointer even when
   another pane has the focus, so the sidebar bar and the overview dock can highlight what is
   under the pointer. Upstream sent motion over another pane to the focused pane, with that
