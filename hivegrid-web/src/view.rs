@@ -25,6 +25,8 @@ use std::time::{Duration, Instant};
 
 const RESIZE_DEBOUNCE: Duration = Duration::from_millis(40);
 const RESIZE_MAX_DELAY: Duration = Duration::from_millis(150);
+/// How long after a middle or Ctrl click a page-opened window still counts as that click's tab.
+const NEW_TAB_CLICK_WINDOW: Duration = Duration::from_secs(2);
 const CALL_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long frames of an unexpected size are dropped after the size was configured.
 const SIZE_SETTLE: Duration = Duration::from_millis(500);
@@ -197,6 +199,9 @@ pub(crate) struct ViewCore {
     hold_frames: Mutex<Option<Instant>>,
     /// The frame size Chrome should be producing; see `check_size`.
     expect: Mutex<Expect>,
+    /// When the pointer last pressed the middle button or Ctrl+left: a window the page opens
+    /// right after is a link meant for a new tab.
+    new_tab_click: Mutex<Option<Instant>>,
 }
 
 /// The `WebView` handed to the pane. Dropping it closes the view.
@@ -340,6 +345,7 @@ impl View {
             tuning: Tuning::from_env(),
             frame_gate: Mutex::new(()),
             hold_frames: Mutex::new(None),
+            new_tab_click: Mutex::new(None),
             expect: Mutex::new(Expect {
                 w: size.pixel_width,
                 h: size.pixel_height,
@@ -721,6 +727,9 @@ impl ViewCore {
     fn mouse(&self, ev: WebMouse) {
         if self.is_closed() {
             return;
+        }
+        if ev.kind == WebMouseKind::Down && (ev.button == 1 || (ev.button == 0 && ev.mods & 0b110 != 0)) {
+            *self.new_tab_click.lock() = Some(Instant::now());
         }
         fn button_name(b: u8) -> &'static str {
             match b {
@@ -1353,6 +1362,15 @@ impl Worker {
                 // The URL is the page's choice: only web addresses are followed (a script must
                 // not steer the pane to data:, file:, javascript: or other schemes).
                 if let Some(url) = p["url"].as_str().filter(|u| popup_url_allowed(u)).and_then(normalize_url) {
+                    let in_tab = core
+                        .new_tab_click
+                        .lock()
+                        .take()
+                        .is_some_and(|t| t.elapsed() < NEW_TAB_CLICK_WINDOW);
+                    if in_tab {
+                        core.emit(WebEvent::OpenTab(url));
+                        return;
+                    }
                     core.desired.lock().url = url.clone();
                     core.update_info(|i| {
                         i.url = url.clone();

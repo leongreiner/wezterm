@@ -1083,7 +1083,7 @@ impl HeaderCtl {
 
     /// An event of tab `tab_id`'s page. Only the active tab draws the pane; every tab can change
     /// its title in the strip.
-    fn on_event(&self, tab_id: u64, event: WebEvent, recorder: Option<&Recorder>) {
+    fn on_event(self: &Arc<Self>, tab_id: u64, event: WebEvent, recorder: Option<&Recorder>) {
         let active = self.tabs.lock().is_active(tab_id);
         match event {
             WebEvent::Frame | WebEvent::Cursor(_) => {
@@ -1113,6 +1113,7 @@ impl HeaderCtl {
                 });
             }
             WebEvent::Closed => self.tab_gone(tab_id),
+            WebEvent::OpenTab(url) => self.tab_op(TabOp::New(Some(url))),
         }
     }
 }

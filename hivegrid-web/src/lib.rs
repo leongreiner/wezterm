@@ -179,6 +179,9 @@ pub enum WebEvent {
     ClipboardText(String),
     /// The page closed itself (`window.close()`); the view is finished. Not sent for `close()`.
     Closed,
+    /// A link was middle- or Ctrl-clicked (or opened with `window.open` right after such a
+    /// click): the owner opens this web address in a new tab.
+    OpenTab(String),
 }
 
 pub trait WebEngine: Send + Sync {

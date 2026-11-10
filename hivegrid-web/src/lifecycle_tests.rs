@@ -740,6 +740,29 @@ fn popups_only_load_web_addresses_in_the_pane() {
 }
 
 #[test]
+fn a_middle_or_ctrl_clicked_link_asks_for_a_new_tab_instead_of_navigating() {
+    let h = Harness::new();
+    let (v, events) = h.running("example.com", "main");
+    let c = h.launcher.chrome(0);
+    eventually("first load done", || !v.info().loading);
+    let n = c.count("Page.navigate");
+    let open = |url: &str| c.session_event(0, "Page.windowOpen", json!({"url": url, "windowName": "", "windowFeatures": [], "userGesture": true}));
+    v.mouse(WebMouse { button: 1, buttons: 4, ..mouse(WebMouseKind::Down) });
+    open("https://mid.example/a");
+    eventually("middle click asked for a tab", || events.lock().contains(&WebEvent::OpenTab("https://mid.example/a".into())));
+    v.mouse(WebMouse { button: 0, buttons: 1, mods: 2, ..mouse(WebMouseKind::Down) });
+    open("https://ctrl.example/b");
+    eventually("both links asked for tabs", || {
+        let e = events.lock();
+        e.contains(&WebEvent::OpenTab("https://mid.example/a".into())) && e.contains(&WebEvent::OpenTab("https://ctrl.example/b".into()))
+    });
+    // Without such a click the window still loads in this tab, and the page did not move before.
+    assert_eq!(c.count("Page.navigate"), n);
+    open("https://plain.example/c");
+    eventually("plain popup navigates", || c.count("Page.navigate") == n + 1);
+}
+
+#[test]
 fn popups_are_closed_and_their_url_loads_in_the_pane() {
     let h = Harness::new();
     let (v, _) = h.running("example.com", "main");
