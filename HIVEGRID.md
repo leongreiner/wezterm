@@ -243,6 +243,10 @@ wezterm/wezterm.
     same pane instead of opening a window, but only `http(s)` URLs (a script cannot steer the pane to
     `data:`, `file:` or `javascript:`). The cursor a page reports is limited to the CSS cursor
     keywords, and a view's events reach the GUI as at most one queued redraw per pane.
+  - Copying a link: headless Chrome has no context menu, so a right press (`WebView::mouse`, button
+    2) also looks the link under the pointer up (`Runtime.evaluate`, `elementFromPoint` then
+    `closest('a[href], area[href]')`, SVG links included, resolved against the document's base) and
+    emits `WebEvent::ClipboardText` with its address; the page still gets the click.
   - Control channel: `ESC _ hgweb ; <command> [; <arg>] ESC \` written to the pane (Lua
     `pane:send_text`, `wezterm cli send-text --no-paste`): `navigate;URL`, `back`, `forward`,
     `reload`, `hardreload`, `stop`, `restart`, `copy-url`, `zoom;PERCENT`, `header;toggle|show|hide`, `tab;...` (Tabs, below),

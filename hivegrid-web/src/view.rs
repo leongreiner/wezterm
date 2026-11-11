@@ -105,6 +105,21 @@ const COPY_JS: &str = r#"(() => {
   return String(getSelection());
 })()"#;
 
+/// The address of the link under the point (`%X`, `%Y` in CSS pixels of the viewport), resolved
+/// against the page; empty when there is none. Chrome has no context menu in this pane, so
+/// right-clicking a link copies this.
+const LINK_JS: &str = r#"(() => {
+  const e = document.elementFromPoint(%X, %Y);
+  const a = e && e.closest && e.closest('a[href], area[href]');
+  if (!a) return '';
+  const h = a.href;
+  const raw = (h && typeof h === 'object') ? h.baseVal : (h || a.getAttribute('href'));
+  try { return new URL(raw, document.baseURI).href; } catch (err) { return ''; }
+})()"#;
+
+/// Longest link address put on the clipboard (characters).
+const MAX_LINK_CHARS: usize = 32768;
+
 #[derive(Clone)]
 struct Desired {
     /// Where the page should be (and, after a crash, what to reload).
@@ -724,7 +739,7 @@ impl ViewCore {
 
     // ---- input: straight to the writer queue ----
 
-    fn mouse(&self, ev: WebMouse) {
+    fn mouse(self: &Arc<Self>, ev: WebMouse) {
         if self.is_closed() {
             return;
         }
@@ -783,6 +798,32 @@ impl ViewCore {
             }
         }
         self.page_send("Input.dispatchMouseEvent", p);
+        if ev.kind == WebMouseKind::Down && ev.button == 2 {
+            self.copy_link_at(ev.x as f64 / zoom, ev.y as f64 / zoom);
+        }
+    }
+
+    /// Put the address of the link at (`x`, `y`) on the clipboard (nothing when there is none).
+    fn copy_link_at(self: &Arc<Self>, x: f64, y: f64) {
+        let Some(a) = self.current() else { return };
+        let weak = Arc::downgrade(self);
+        let expression = LINK_JS.replace("%X", &x.floor().to_string()).replace("%Y", &y.floor().to_string());
+        a.browser.conn.send(
+            "Runtime.evaluate",
+            json!({"expression": expression, "returnByValue": true}),
+            Some(&a.session),
+            Some(Box::new(move |r| {
+                let url = r
+                    .ok()
+                    .and_then(|v| v["result"]["value"].as_str().map(|u| sanitize_display(u, MAX_LINK_CHARS)))
+                    .unwrap_or_default();
+                if !url.is_empty() {
+                    if let Some(core) = weak.upgrade() {
+                        core.emit(WebEvent::ClipboardText(url));
+                    }
+                }
+            })),
+        );
     }
 
     fn key(&self, ev: WebKey) {

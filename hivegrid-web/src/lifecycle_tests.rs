@@ -332,6 +332,33 @@ fn copy_selection_reports_the_selected_text() {
 }
 
 #[test]
+fn right_click_copies_the_link_under_the_pointer() {
+    let h = Harness::new();
+    let (v, events) = h.running("example.com", "main");
+    let c = h.launcher.chrome(0);
+    v.mouse(WebMouse { buttons: 1, ..mouse(WebMouseKind::Down) });
+    v.mouse(WebMouse { buttons: 0, button: 2, ..mouse(WebMouseKind::Up) });
+    eventually("no lookup without a right press", || c.count("Input.dispatchMouseEvent") == 2);
+    let looked_up = |c: &FakeChrome| {
+        c.all("Runtime.evaluate")
+            .into_iter()
+            .filter(|c| c.params["expression"].as_str().is_some_and(|e| e.contains("elementFromPoint")))
+            .count()
+    };
+    assert_eq!(looked_up(&c), 0);
+    v.mouse(WebMouse { button: 2, buttons: 2, ..mouse(WebMouseKind::Down) });
+    eventually("clipboard text", || events.lock().contains(&WebEvent::ClipboardText("selected text".into())));
+    let lookup = c
+        .all("Runtime.evaluate")
+        .into_iter()
+        .map(|c| c.params)
+        .find(|p| p["expression"].as_str().is_some_and(|e| e.contains("elementFromPoint")))
+        .expect("the link was looked up in the page");
+    assert!(lookup["expression"].as_str().unwrap().contains("elementFromPoint(10, 20)"));
+    assert_eq!(lookup["returnByValue"], true);
+}
+
+#[test]
 fn javascript_dialogs_are_answered_by_policy() {
     let h = Harness::new();
     let (_v, _) = h.running("example.com", "main");
