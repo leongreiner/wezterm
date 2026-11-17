@@ -176,6 +176,12 @@ impl Edit {
         self.text.iter().collect()
     }
 
+    /// The selected text: all of it, or `None` when nothing is selected (only select-all, which
+    /// a fresh edit starts with, selects).
+    pub fn selection(&self) -> Option<String> {
+        (self.all && !self.text.is_empty()).then(|| self.text())
+    }
+
     /// Typed or pasted text: tabs and line breaks become spaces, other control characters are
     /// dropped.
     pub fn insert(&mut self, s: &str) {

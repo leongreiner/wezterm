@@ -266,6 +266,8 @@ wezterm/wezterm.
     coordinates start below the row. Typing: a click on the field, `location` or Ctrl+L starts
     an edit (the page's URL selected; a hidden header shows for the edit only), and while it
     runs every key, paste and composed text belongs to the field and none reaches the page;
+    Ctrl+C (Ctrl+Insert) copies the selected text of the field to the clipboard and Ctrl+X cuts it
+    (only a select-all selects: the fresh edit, Ctrl+L; nothing selected copies nothing);
     Enter resolves the text with `hivegrid_web::resolve_location` (an address as
     `normalize_url` reads it, else a search with `web.search` of `settings.json`, Google when
     the key is absent) and navigates, an unopenable location stays in the field with the

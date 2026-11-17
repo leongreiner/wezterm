@@ -1553,6 +1553,26 @@ fn ctrl_l_edits_the_address_and_a_click_on_the_page_gives_it_up() {
 }
 
 #[test]
+fn ctrl_c_and_ctrl_x_in_the_address_field_copy_the_selected_address() {
+    let f = fixture_header();
+    f.engine.view.set_info("https://e.test/page", "");
+    f.pane.key_down(KeyCode::Char('l'), KeyModifiers::CTRL).unwrap();
+    f.pane.key_down(KeyCode::Char('c'), KeyModifiers::CTRL).unwrap();
+    assert_eq!(f.host.clipboard(), vec![Some("https://e.test/page".to_string())]);
+    assert!(f.ctl_editing(), "copying keeps the field open");
+    assert!(f.engine.view.st.lock().keys.is_empty(), "the page gets no Ctrl+C");
+    // Nothing selected after the caret moved: nothing is copied.
+    press(&f, KeyCode::End);
+    f.pane.key_down(KeyCode::Char('c'), KeyModifiers::CTRL).unwrap();
+    assert_eq!(f.host.clipboard().len(), 1);
+    // Ctrl+X copies and empties the field.
+    f.pane.key_down(KeyCode::Char('l'), KeyModifiers::CTRL).unwrap();
+    f.pane.key_down(KeyCode::Char('x'), KeyModifiers::CTRL).unwrap();
+    assert_eq!(f.host.clipboard().len(), 2);
+    assert_eq!(f.pane.ctl.header.lock().edit.as_ref().unwrap().text(), "");
+}
+
+#[test]
 fn the_pointer_is_a_hand_over_buttons_and_a_text_cursor_over_the_field() {
     let f = fixture_header();
     f.engine.view.st.lock().cursor = Some("crosshair".into());
@@ -1579,6 +1599,10 @@ fn field_keys() {
     assert_eq!(field_key(&KeyCode::Char('w'), ctrl), FieldKey::Edit(EditKey::DeleteWord));
     assert_eq!(field_key(&KeyCode::Backspace, ctrl), FieldKey::Edit(EditKey::DeleteWord));
     assert_eq!(field_key(&KeyCode::Char('v'), ctrl), FieldKey::Ignore);
+    assert_eq!(field_key(&KeyCode::Char('c'), ctrl), FieldKey::Copy { cut: false });
+    assert_eq!(field_key(&KeyCode::Char('\u{3}'), ctrl), FieldKey::Copy { cut: false });
+    assert_eq!(field_key(&KeyCode::Insert, ctrl), FieldKey::Copy { cut: false });
+    assert_eq!(field_key(&KeyCode::Char('x'), ctrl), FieldKey::Copy { cut: true });
     assert_eq!(field_key(&KeyCode::Char('x'), KeyModifiers::ALT), FieldKey::Ignore);
     assert_eq!(field_key(&KeyCode::Tab, n), FieldKey::Edit(EditKey::Accept));
     assert_eq!(field_key(&KeyCode::UpArrow, n), FieldKey::Edit(EditKey::Prev));

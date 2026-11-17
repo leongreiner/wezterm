@@ -795,6 +795,21 @@ impl HeaderCtl {
         });
     }
 
+    /// Ctrl+C / Ctrl+X in the field: the selected text goes to the clipboard, and with `cut` it
+    /// is removed from the field. Nothing selected, nothing copied.
+    fn edit_copy(&self, cut: bool) {
+        let selected = self.header.lock().edit.as_ref().and_then(Edit::selection);
+        let Some(text) = selected else { return };
+        self.host.notify(MuxNotification::AssignClipboard {
+            pane_id: self.pane_id,
+            selection: ClipboardSelection::Clipboard,
+            clipboard: Some(text),
+        });
+        if cut {
+            self.edit_key(EditKey::Backspace);
+        }
+    }
+
     /// Typed (`suggest`) or pasted text into the field. Typing at the end of the text offers the
     /// history's completion; a paste never does, so it cannot be redirected by one.
     fn edit_insert(&self, text: &str, suggest: bool) {
@@ -1637,6 +1652,7 @@ impl Pane for WebPane {
                 FieldKey::Commit => self.ctl.commit(),
                 FieldKey::Cancel => self.ctl.cancel_edit(),
                 FieldKey::Edit(k) => self.ctl.edit_key(k),
+                FieldKey::Copy { cut } => self.ctl.edit_copy(cut),
                 FieldKey::Text(s) => self.ctl.edit_insert(&s, true),
                 FieldKey::Ignore => {}
             }
@@ -1810,6 +1826,8 @@ enum FieldKey {
     Commit,
     Cancel,
     Edit(EditKey),
+    /// Ctrl+C (Ctrl+Insert), or with `cut` Ctrl+X: the field's selection to the clipboard.
+    Copy { cut: bool },
     Text(String),
     /// Swallowed: a key that is neither text nor an editing command never reaches the page.
     Ignore,
@@ -1824,6 +1842,7 @@ fn field_key(key: &KeyCode, mods: KeyModifiers) -> FieldKey {
             FieldKey::Edit(if ctrl { EditKey::DeleteWord } else { EditKey::Backspace })
         }
         KeyCode::Delete => FieldKey::Edit(EditKey::Delete),
+        KeyCode::Insert if ctrl => FieldKey::Copy { cut: false },
         KeyCode::LeftArrow => FieldKey::Edit(EditKey::Left),
         KeyCode::RightArrow => FieldKey::Edit(EditKey::Right),
         KeyCode::Home => FieldKey::Edit(EditKey::Home),
@@ -1842,6 +1861,8 @@ fn field_key(key: &KeyCode, mods: KeyModifiers) -> FieldKey {
                 Some('k') => FieldKey::Edit(EditKey::KillToEnd),
                 Some('w') => FieldKey::Edit(EditKey::DeleteWord),
                 Some('l') => FieldKey::Edit(EditKey::SelectAll),
+                Some('c') => FieldKey::Copy { cut: false },
+                Some('x') => FieldKey::Copy { cut: true },
                 Some(_) => FieldKey::Ignore,
                 None if mods.intersects(Modifiers::ALT | Modifiers::SUPER) => FieldKey::Ignore,
                 None => FieldKey::Text(c.to_string()),
